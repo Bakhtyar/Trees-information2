@@ -1,0 +1,6 @@
+{
+  "name": "لوحة تخطيط الرواية - Story & Novel Mapper",
+  "description": "تطبيق ويب متكامل لإدارة مخطط الرواية والقصة على لوحة عمل لا نهائية مع عقد وشخصيات وخطوط وعلاقات وملاحظات وتصدير شامل",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
