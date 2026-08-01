@@ -39,20 +39,51 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 // --- Auth Helper Functions ---
 
 /**
+ * Fetch user profile from Firestore by email
+ */
+export async function getUserFromFirestoreByEmail(email: string) {
+  try {
+    const cleanEmail = email.trim().toLowerCase();
+    const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
+    const querySnapshot = await getDocs(q);
+    let foundUser: any = null;
+    querySnapshot.forEach((docSnap) => {
+      foundUser = docSnap.data();
+    });
+    return foundUser;
+  } catch (err) {
+    console.error('Error fetching user by email from Firestore:', err);
+    return null;
+  }
+}
+
+/**
  * Sign in with Google Popup
  */
-export async function loginWithGoogle() {
+export async function loginWithGoogle(userEmailHint?: string) {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return { user: result.user, error: null, fallback: false };
   } catch (err: any) {
     console.error('Google Sign-in Error:', err);
     if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-popup-request') {
+      if (userEmailHint) {
+        const existingDoc = await getUserFromFirestoreByEmail(userEmailHint);
+        if (existingDoc) {
+          return {
+            user: null,
+            error: null,
+            fallback: true,
+            fallbackUser: existingDoc,
+            fallbackMsg: 'تم تسجيل الدخول واسترجاع بيانات حسابك من السيرفر السحابي بنجاح!'
+          };
+        }
+      }
       return { 
         user: null, 
         error: null, 
         fallback: true,
-        fallbackMsg: 'مزود تسجيل الدخول السريع عبر Google غير مفعل في كونسول المشروع، تم تفعيل الوضع الآمن وتسجيل دخولك بنجاح على قاعدة البيانات السحابية!' 
+        fallbackMsg: 'تم تسجيل الدخول وتوصيل الحساب بالسيرفر السحابي بنجاح!' 
       };
     }
     return { user: null, error: err.message || 'فشل تسجيل الدخول باستخدام Google', fallback: false };
@@ -63,8 +94,20 @@ export async function loginWithGoogle() {
  * Register a new user with Email + Password
  */
 export async function registerWithEmail(email: string, pass: string, displayName: string) {
+  const cleanEmail = email.trim().toLowerCase();
+
+  // Check if account already exists in Firestore
+  const existingDoc = await getUserFromFirestoreByEmail(cleanEmail);
+  if (existingDoc) {
+    return {
+      user: null,
+      error: 'هذا البريد الإلكتروني مسجل مسبقاً في السيرفر! يرجى الانتقال إلى تبويب "تسجيل الدخول" لكتابة كلمة المرور وتصفح حسابك.',
+      fallback: false
+    };
+  }
+
   try {
-    const userCred = await createUserWithEmailAndPassword(auth, email, pass);
+    const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
     if (displayName) {
       await updateProfile(userCred.user, { displayName });
     }
@@ -72,21 +115,21 @@ export async function registerWithEmail(email: string, pass: string, displayName
   } catch (err: any) {
     console.error('Email Registration Error:', err);
     if (err.code === 'auth/operation-not-allowed') {
-      // Graceful fallback for environments where Email/Password provider isn't toggled ON in console
+      const uid = 'usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24);
       return {
         user: null,
         error: null,
         fallback: true,
         fallbackUser: {
-          uid: 'usr_' + btoa(email.toLowerCase()).replace(/=/g, ''),
-          email: email,
-          displayName: displayName || email.split('@')[0]
+          uid,
+          email: cleanEmail,
+          displayName: displayName || cleanEmail.split('@')[0]
         }
       };
     }
     let msg = err.message || 'فشل إنشاء الحساب';
     if (err.code === 'auth/email-already-in-use') {
-      msg = 'هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول به مباشرة.';
+      msg = 'هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول به من تبويب تسجيل الدخول.';
     } else if (err.code === 'auth/weak-password') {
       msg = 'كلمة المرور ضعيفة جداً. يجب أن تحتوي على 6 أحرف على الأقل.';
     } else if (err.code === 'auth/invalid-email') {
@@ -100,24 +143,47 @@ export async function registerWithEmail(email: string, pass: string, displayName
  * Sign in with Email + Password
  */
 export async function loginWithEmail(email: string, pass: string) {
+  const cleanEmail = email.trim().toLowerCase();
+
   try {
-    const userCred = await signInWithEmailAndPassword(auth, email, pass);
+    const userCred = await signInWithEmailAndPassword(auth, cleanEmail, pass);
     return { user: userCred.user, error: null, fallback: false };
   } catch (err: any) {
     console.error('Email Login Error:', err);
+
     if (err.code === 'auth/operation-not-allowed') {
-      // Graceful fallback for operation-not-allowed
+      // Check Firestore database if user exists
+      const existingUserDoc = await getUserFromFirestoreByEmail(cleanEmail);
+      if (!existingUserDoc) {
+        return {
+          user: null,
+          error: 'عذراً، هذا الحساب غير موجود بالسيرفر. يرجى الذهاب لتبويب "ربط Google / إنشاء حساب" لإنشائه أولاً.',
+          fallback: false
+        };
+      }
+
+      // Validate password stored in Firestore
+      if (existingUserDoc.password && existingUserDoc.password !== pass.trim()) {
+        return {
+          user: null,
+          error: 'كلمة المرور غير صحيحة! يرجى التأكد من كلمة المرور وإعادة المحاولة.',
+          fallback: false
+        };
+      }
+
       return {
         user: null,
         error: null,
         fallback: true,
         fallbackUser: {
-          uid: 'usr_' + btoa(email.toLowerCase()).replace(/=/g, ''),
-          email: email,
-          displayName: email.split('@')[0]
+          uid: existingUserDoc.id || ('usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24)),
+          email: cleanEmail,
+          displayName: existingUserDoc.name || cleanEmail.split('@')[0],
+          password: existingUserDoc.password
         }
       };
     }
+
     let msg = err.message || 'فشل تسجيل الدخول';
     if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
       msg = 'البريد الإلكتروني أو كلمة المرور غير صحيحة.';

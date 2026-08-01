@@ -129,27 +129,37 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   const handleDirectGoogleLogin = async () => {
     setIsLinking(true);
     setRestoreStatus(null);
-    const res = await loginWithGoogle();
+    const res = await loginWithGoogle(user.email || googleEmailInput);
     setIsLinking(false);
 
-    let uid = res.user?.uid;
-    let cleanEmail = res.user?.email || user.email || 'author@gmail.com';
-    let cleanName = res.user?.displayName || user.name || cleanEmail.split('@')[0] || 'كاتب المخططات';
+    let uid = res.user?.uid || res.fallbackUser?.id || res.fallbackUser?.uid;
+    let cleanEmail = res.user?.email || res.fallbackUser?.email || user.email || 'author@gmail.com';
+    let cleanName = res.user?.displayName || res.fallbackUser?.name || user.name || cleanEmail.split('@')[0] || 'كاتب المخططات';
 
-    if (res.fallback) {
-      uid = user.id || 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
-    } else if (res.error || !res.user) {
-      setRestoreStatus({
-        type: 'error',
-        msg: res.error || 'فشل تسجيل الدخول المباشر باستخدام Google'
-      });
-      return;
+    if (!uid) {
+      if (res.fallback) {
+        uid = user.id || 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
+      } else if (res.error) {
+        setRestoreStatus({
+          type: 'error',
+          msg: res.error
+        });
+        return;
+      }
+    }
+
+    // Check if user exists in Firestore database
+    const existingFirestoreUser = await getUserFromFirestoreByEmail(cleanEmail);
+    if (existingFirestoreUser) {
+      uid = existingFirestoreUser.id || uid;
+      cleanName = existingFirestoreUser.name || cleanName;
     }
 
     const updatedProfile: UserProfile = {
       id: uid!,
       name: cleanName,
       email: cleanEmail,
+      password: existingFirestoreUser?.password || user.password,
       googleConnected: true,
       lastSyncedAt: Date.now(),
       avatar: res.user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
@@ -159,13 +169,20 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     onUpdateUser(updatedProfile);
     await saveUserToFirestore(uid!, updatedProfile);
 
-    // Sync local projects to Firestore
-    const localProjects = loadAllProjects();
-    await saveAllProjectsToFirestore(uid!, localProjects);
+    // Fetch user's remote projects from Firestore
+    const remoteProjects = await getUserProjectsFromFirestore(uid!);
+    if (remoteProjects && remoteProjects.length > 0) {
+      for (const proj of remoteProjects) {
+        saveProject(proj);
+      }
+    } else {
+      const localProjects = loadAllProjects();
+      await saveAllProjectsToFirestore(uid!, localProjects);
+    }
 
     setRestoreStatus({
       type: 'success',
-      msg: `تم تسجيل الدخول بحساب Google (${cleanEmail}) وتوصيله بالسيرفر السحابي بنجاح!`
+      msg: `تم تسجيل الدخول بحساب Google (${cleanEmail}) واسترجاع مشاريعك السحابية بنجاح!`
     });
     onRefreshProjects();
   };
@@ -184,32 +201,18 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     setIsLinking(true);
     setRestoreStatus(null);
 
-    const cleanEmail = googleEmailInput.trim();
+    const cleanEmail = googleEmailInput.trim().toLowerCase();
     const cleanName = googleNameInput.trim() || 'كاتب المخططات';
 
     // Try register in Firebase
     const regRes = await registerWithEmail(cleanEmail, googlePasswordInput, cleanName);
 
-    let finalUid = 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
+    let finalUid = 'usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24);
 
     if (regRes.user) {
       finalUid = regRes.user.uid;
     } else if (regRes.fallback && regRes.fallbackUser) {
       finalUid = regRes.fallbackUser.uid;
-    } else if (regRes.error && regRes.error.includes('مستخدم بالفعل')) {
-      const loginRes = await loginWithEmail(cleanEmail, googlePasswordInput);
-      if (loginRes.user) {
-        finalUid = loginRes.user.uid;
-      } else if (loginRes.fallback && loginRes.fallbackUser) {
-        finalUid = loginRes.fallbackUser.uid;
-      } else {
-        setIsLinking(false);
-        setRestoreStatus({
-          type: 'error',
-          msg: 'هذا البريد مستخدم بالفعل بكلمة مرور مختلفة. يرجى استخدام شاشة "تسجيل الدخول" أو كتابة كلمة المرور الصحيحة.'
-        });
-        return;
-      }
     } else if (regRes.error) {
       setIsLinking(false);
       setRestoreStatus({
@@ -241,12 +244,12 @@ export const AccountModal: React.FC<AccountModalProps> = ({
 
     setRestoreStatus({
       type: 'success',
-      msg: `تم ربط حساب Google (${cleanEmail}) وإنشاء كلمة المرور وسيرفر البيانات السحابية بنجاح!`
+      msg: `تم إنشاء حسابك وحفظ كلمة المرور وسيرفر البيانات السحابية بنجاح!`
     });
     onRefreshProjects();
   };
 
-  // 3. Logging into Existing Account via Firebase
+  // 3. Logging into Existing Account via Firebase / Firestore
   const handleExistingAccountLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginEmailInput.trim()) return;
@@ -262,10 +265,18 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     setIsLoggingIn(true);
     setRestoreStatus(null);
 
-    const cleanEmail = loginEmailInput.trim();
+    const cleanEmail = loginEmailInput.trim().toLowerCase();
     const loginRes = await loginWithEmail(cleanEmail, loginPasswordInput);
 
     setIsLoggingIn(false);
+
+    if (loginRes.error) {
+      setRestoreStatus({
+        type: 'error',
+        msg: loginRes.error
+      });
+      return;
+    }
 
     let finalUid: string | null = null;
     let nameFromEmail = cleanEmail.split('@')[0] || 'كاتب الرواية';
@@ -275,21 +286,21 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       nameFromEmail = loginRes.user.displayName || nameFromEmail;
     } else if (loginRes.fallback && loginRes.fallbackUser) {
       finalUid = loginRes.fallbackUser.uid;
-    } else if (loginRes.error) {
-      setRestoreStatus({
-        type: 'error',
-        msg: loginRes.error || 'فشل تسجيل الدخول. تحقق من البريد وكلمة المرور.'
-      });
-      return;
+      nameFromEmail = loginRes.fallbackUser.displayName || nameFromEmail;
     }
 
     if (!finalUid) return;
 
+    // Retrieve saved user record from Firestore
+    const firestoreUser = await getUserFromFirestoreByEmail(cleanEmail);
+    const finalName = firestoreUser?.name || nameFromEmail;
+    const finalPass = firestoreUser?.password || loginPasswordInput.trim();
+
     const loggedInProfile: UserProfile = {
       id: finalUid,
-      name: nameFromEmail,
+      name: finalName,
       email: cleanEmail,
-      password: loginPasswordInput.trim(),
+      password: finalPass,
       googleConnected: true,
       lastSyncedAt: Date.now(),
       avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
@@ -304,12 +315,19 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       for (const proj of remoteProjects) {
         saveProject(proj);
       }
+      setRestoreStatus({
+        type: 'success',
+        msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح واسترجاع عدد (${remoteProjects.length}) من مشاريعك ورواياتك من السيرفر السحابي.`
+      });
+    } else {
+      const localProjects = loadAllProjects();
+      await saveAllProjectsToFirestore(finalUid, localProjects);
+      setRestoreStatus({
+        type: 'success',
+        msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح وتوثيق الحساب على السيرفر السحابي.`
+      });
     }
 
-    setRestoreStatus({
-      type: 'success',
-      msg: `أهلاً بك مجدداً! تم تسجيل الدخول لسيرفر الحساب (${cleanEmail}) واسترجاع مشاريعك بنجاح.`
-    });
     onRefreshProjects();
   };
 
