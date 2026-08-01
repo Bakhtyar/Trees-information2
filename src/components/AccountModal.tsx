@@ -29,6 +29,7 @@ import {
   saveUserToFirestore,
   getUserProjectsFromFirestore,
   saveAllProjectsToFirestore,
+  getUserFromFirestoreByEmail,
   auth
 } from '../lib/firebase';
 import { updatePassword } from 'firebase/auth';
@@ -80,6 +81,12 @@ export const AccountModal: React.FC<AccountModalProps> = ({
 
   // Status message
   const [restoreStatus, setRestoreStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  // Instant Reset state for password recovery
+  const [foundUserForReset, setFoundUserForReset] = useState<any>(null);
+  const [instantNewPassInput, setInstantNewPassInput] = useState('');
+  const [showInstantPassView, setShowInstantPassView] = useState(false);
+  const [isSubmittingInstantReset, setIsSubmittingInstantReset] = useState(false);
 
   if (!isOpen) return null;
 
@@ -138,7 +145,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
 
     if (!uid) {
       if (res.fallback) {
-        uid = user.id || 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
+        uid = user.id || 'usr_' + btoa(encodeURIComponent(cleanEmail.toLowerCase())).replace(/=/g, '');
       } else if (res.error) {
         setRestoreStatus({
           type: 'error',
@@ -161,6 +168,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       email: cleanEmail,
       password: existingFirestoreUser?.password || user.password,
       googleConnected: true,
+      createdAt: Date.now(),
       lastSyncedAt: Date.now(),
       avatar: res.user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
     };
@@ -170,14 +178,14 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     await saveUserToFirestore(uid!, updatedProfile);
 
     // Fetch user's remote projects from Firestore
-    const remoteProjects = await getUserProjectsFromFirestore(uid!);
+    const remoteProjects = await getUserProjectsFromFirestore(uid!, cleanEmail);
     if (remoteProjects && remoteProjects.length > 0) {
       for (const proj of remoteProjects) {
         saveProject(proj);
       }
     } else {
       const localProjects = loadAllProjects();
-      await saveAllProjectsToFirestore(uid!, localProjects);
+      await saveAllProjectsToFirestore(uid!, localProjects, cleanEmail);
     }
 
     setRestoreStatus({
@@ -207,7 +215,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     // Try register in Firebase
     const regRes = await registerWithEmail(cleanEmail, googlePasswordInput, cleanName);
 
-    let finalUid = 'usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24);
+    let finalUid = 'usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '').substring(0, 24);
 
     if (regRes.user) {
       finalUid = regRes.user.uid;
@@ -230,6 +238,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       email: cleanEmail,
       password: googlePasswordInput.trim(),
       googleConnected: true,
+      createdAt: Date.now(),
       lastSyncedAt: Date.now(),
       avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
     };
@@ -240,7 +249,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
 
     // Sync local projects to Firestore
     const localProjects = loadAllProjects();
-    await saveAllProjectsToFirestore(finalUid, localProjects);
+    await saveAllProjectsToFirestore(finalUid, localProjects, cleanEmail);
 
     setRestoreStatus({
       type: 'success',
@@ -302,6 +311,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       email: cleanEmail,
       password: finalPass,
       googleConnected: true,
+      createdAt: Date.now(),
       lastSyncedAt: Date.now(),
       avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
     };
@@ -310,7 +320,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     onUpdateUser(loggedInProfile);
 
     // Download user's projects from Firestore server
-    const remoteProjects = await getUserProjectsFromFirestore(finalUid);
+    const remoteProjects = await getUserProjectsFromFirestore(finalUid, cleanEmail);
     if (remoteProjects && remoteProjects.length > 0) {
       for (const proj of remoteProjects) {
         saveProject(proj);
@@ -321,7 +331,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       });
     } else {
       const localProjects = loadAllProjects();
-      await saveAllProjectsToFirestore(finalUid, localProjects);
+      await saveAllProjectsToFirestore(finalUid, localProjects, cleanEmail);
       setRestoreStatus({
         type: 'success',
         msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح وتوثيق الحساب على السيرفر السحابي.`
@@ -331,36 +341,102 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     onRefreshProjects();
   };
 
-  // 4. Request Password Reset Link via Firebase Auth Email Service
+  // 4. Request Password Reset Link & Instant On-Screen Account Recovery
   const handleSendResetEmail = async (e: React.FormEvent) => {
     e.preventDefault();
-    const targetEmail = forgotEmailInput.trim() || loginEmailInput.trim() || googleEmailInput.trim();
+    const targetEmail = forgotEmailInput.trim().toLowerCase() || loginEmailInput.trim().toLowerCase() || googleEmailInput.trim().toLowerCase();
     if (!targetEmail) {
       setRestoreStatus({
         type: 'error',
-        msg: 'يرجى كتابة البريد الإلكتروني لإرسال رابط إعادة التعيين.'
+        msg: 'يرجى كتابة البريد الإلكتروني لإعادة تعيين كلمة المرور.'
       });
       return;
     }
 
     setIsSendingReset(true);
     setRestoreStatus(null);
+    setFoundUserForReset(null);
 
-    const { success, error } = await sendResetPassword(targetEmail);
+    // Send reset email via Firebase Auth
+    const { success } = await sendResetPassword(targetEmail);
+
+    // Query Firestore database directly for instant recovery
+    const dbUser = await getUserFromFirestoreByEmail(targetEmail);
     setIsSendingReset(false);
 
-    if (success) {
-      setIsForgotPassword(false);
+    if (dbUser) {
+      setFoundUserForReset(dbUser);
       setRestoreStatus({
         type: 'success',
-        msg: `تم إرسال رسالة إعادة تعيين كلمة المرور رسمياً إلى بريدك (${targetEmail}). افتح صندوق الرسائل ببريدك واضغط على الرابط لتغيير كلمة السر.`
+        msg: `تم العثور على حسابك المرتبط بالبريد (${targetEmail})! يمكنك رؤية كلمة المرور أو تغييرها فوراً بالأسفل دون الحاجة لانتظار البريد.`
+      });
+    } else if (success) {
+      setRestoreStatus({
+        type: 'success',
+        msg: `تم إرسال رابط إعادة التعيين إلى بريدك الإلكتروني (${targetEmail}). يرجى مراجعة البريد الوارد أو الرسائل المزعجة (Spam).`
       });
     } else {
       setRestoreStatus({
         type: 'error',
-        msg: error || 'تعذر إرسال رسالة التعيين. تأكد من صحة البريد الإلكتروني.'
+        msg: `لم نجد حساباً مسجلاً بهذا البريد (${targetEmail}). يمكنك إنشاء حساب جديد بالانتقال إلى تبويب "ربط Google / إنشاء حساب".`
       });
     }
+  };
+
+  // Instant Reset Handler
+  const handleInstantResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!foundUserForReset) return;
+
+    const newPass = instantNewPassInput.trim();
+    if (!newPass || newPass.length < 6) {
+      setRestoreStatus({
+        type: 'error',
+        msg: 'كلمة المرور الجديدة يجب أن تحتوي على 6 أحرف أو أرقام على الأقل.'
+      });
+      return;
+    }
+
+    setIsSubmittingInstantReset(true);
+    setRestoreStatus(null);
+
+    const uid = foundUserForReset.id || foundUserForReset.uid || ('usr_' + btoa(encodeURIComponent(foundUserForReset.email)).replace(/=/g, '').substring(0, 24));
+    const cleanEmail = foundUserForReset.email;
+    const cleanName = foundUserForReset.name || cleanEmail.split('@')[0];
+
+    const updatedProfile: UserProfile = {
+      id: uid,
+      name: cleanName,
+      email: cleanEmail,
+      password: newPass,
+      googleConnected: true,
+      createdAt: Date.now(),
+      lastSyncedAt: Date.now(),
+      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
+    };
+
+    saveUserProfile(updatedProfile);
+    onUpdateUser(updatedProfile);
+    await saveUserToFirestore(uid, updatedProfile);
+
+    // Fetch remote projects from Firestore
+    const remoteProjects = await getUserProjectsFromFirestore(uid, cleanEmail);
+    if (remoteProjects && remoteProjects.length > 0) {
+      for (const proj of remoteProjects) {
+        saveProject(proj);
+      }
+    }
+
+    setIsSubmittingInstantReset(false);
+    setIsForgotPassword(false);
+    setFoundUserForReset(null);
+    setInstantNewPassInput('');
+
+    setRestoreStatus({
+      type: 'success',
+      msg: `تم تحديث كلمة المرور وتسجيل دخولك بنجاح! تم استرجاع مشاريعك بالكامل.`
+    });
+    onRefreshProjects();
   };
 
   // Unlink Google account after user confirms
@@ -369,6 +445,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     const unlinkedProfile: UserProfile = {
       ...user,
       googleConnected: false,
+      createdAt: Date.now(),
       lastSyncedAt: Date.now()
     };
     saveUserProfile(unlinkedProfile);
@@ -388,6 +465,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
       name: 'كاتب زائر',
       email: '',
       googleConnected: false,
+      createdAt: Date.now(),
       lastSyncedAt: Date.now()
     };
     saveUserProfile(loggedOutProfile);
@@ -567,7 +645,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                 </div>
 
                 {showChangePassForm && (
-                  <form onSubmit={handleUpdatePassword} className="p-3 bg-slate-950/80 rounded-xl border border-cyan-500/30 space-y-2 text-xs animate-fadeIn">
+                  <div className="p-3 bg-slate-950/80 rounded-xl border border-cyan-500/30 space-y-2 text-xs animate-fadeIn">
                     <label className="block text-slate-300 font-bold">اكتب كلمة المرور الجديدة:</label>
                     <div className="flex items-center gap-2">
                       <input
@@ -579,14 +657,15 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                         required
                       />
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={handleUpdatePassword}
                         disabled={isUpdatingPassword}
                         className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold rounded-lg transition shrink-0"
                       >
                         {isUpdatingPassword ? 'جاري الحفظ...' : 'حفظ الجديدة'}
                       </button>
                     </div>
-                  </form>
+                  </div>
                 )}
               </div>
             )}
@@ -709,7 +788,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                 <span className="bg-slate-900 px-3 text-[11px] text-slate-500 font-bold shrink-0">أو أدخل بيانات الجيميل وكلمة المرور يدوياً</span>
               </div>
 
-              <form onSubmit={handleGoogleConnect} className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
                 <div className="flex items-center gap-2 text-slate-100 font-bold text-sm border-b border-slate-700 pb-2">
                   <Mail className="w-5 h-5 text-amber-400" />
                   <span>ربط الحساب يدوي ببريد Gmail وكلمة مرور</span>
@@ -760,7 +839,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                 </div>
 
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleGoogleConnect}
                   disabled={isLinking}
                   className="w-full py-3 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
                 >
@@ -773,7 +853,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     </>
                   )}
                 </button>
-              </form>
+              </div>
             </div>
           )}
 
@@ -835,7 +915,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     <span className="bg-slate-900 px-3 text-[11px] text-slate-500 font-bold shrink-0">أو تسجيل الدخول بكلمة المرور والبريد</span>
                   </div>
 
-                  <form onSubmit={handleExistingAccountLogin} className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
+                  <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
                     <div className="flex items-center gap-2 text-slate-100 font-bold text-sm border-b border-slate-700 pb-2">
                       <LogIn className="w-5 h-5 text-cyan-400" />
                       <span>تسجيل الدخول إلى حسابك</span>
@@ -886,7 +966,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     </div>
 
                     <button
-                      type="submit"
+                      type="button"
+                      onClick={handleExistingAccountLogin}
                       disabled={isLoggingIn}
                       className="w-full py-3 px-4 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2"
                     >
@@ -899,72 +980,131 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                         </>
                       )}
                     </button>
-                  </form>
+                  </div>
                 </>
               ) : (
                 /* Forgot Password Form */
-                <form onSubmit={handleSendResetEmail} className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
-                  <div className="flex items-center gap-2 text-slate-100 font-bold text-sm border-b border-slate-700 pb-2">
-                    <Mail className="w-5 h-5 text-amber-400" />
-                    <span>إعادة تعيين كلمة المرور عن طريق البريد</span>
-                  </div>
+                <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700/80 space-y-4">
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 text-slate-100 font-bold text-sm border-b border-slate-700 pb-2">
+                      <Mail className="w-5 h-5 text-amber-400" />
+                      <span>إعادة تعيين كلمة المرور عن طريق البريد</span>
+                    </div>
 
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    أدخل عنوان بريدك الإلكتروني وسيتم إرسال رابط رسميا لإعادة تعيين كلمة المرور عبر Firebase Auth.
-                  </p>
-
-                  <div className="p-3 bg-amber-950/30 border border-amber-500/30 rounded-xl text-[11px] text-amber-200/90 space-y-1">
-                    <p className="font-bold flex items-center gap-1.5">
-                      <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                      تنويه حول وصول الرسائل:
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      أدخل عنوان بريدك الإلكتروني وسيتم إرسال رابط رسميا لإعادة تعيين كلمة المرور عبر Firebase Auth.
                     </p>
-                    <p>
-                      إذا لم تجد الرسالة في صندوق الوارد (Inbox) خلال دقيقة، يرجى مراجعة مجلد الرسائل المزعجة (Spam / Junk). كما يمكنك رؤية كلمة المرور وتغييرها في أي وقت مباشرة داخل التطبيق عند تسجيل الدخول!
-                    </p>
-                  </div>
 
-                  <div className="space-y-3 text-xs">
-                    <div>
-                      <label className="block text-slate-300 font-semibold mb-1">البريد الإلكتروني لطلب التعيين</label>
-                      <div className="relative">
-                        <Mail className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                        <input
-                          type="email"
-                          value={forgotEmailInput}
-                          onChange={(e) => setForgotEmailInput(e.target.value)}
-                          placeholder="your-email@gmail.com"
-                          className="w-full pr-9 pl-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-100 focus:outline-none focus:border-amber-500 dir-ltr text-right"
-                          required
-                        />
+                    <div className="p-3 bg-amber-950/30 border border-amber-500/30 rounded-xl text-[11px] text-amber-200/90 space-y-1">
+                      <p className="font-bold flex items-center gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                        تنويه حول وصول الرسائل:
+                      </p>
+                      <p>
+                        إذا لم تجد الرسالة في صندوق الوارد (Inbox) خلال دقيقة، يرجى مراجعة مجلد الرسائل المزعجة (Spam / Junk). كما يمكنك رؤية كلمة المرور وتغييرها في أي وقت مباشرة داخل التطبيق عند تسجيل الدخول!
+                      </p>
+                    </div>
+
+                    <div className="space-y-3 text-xs">
+                      <div>
+                        <label className="block text-slate-300 font-semibold mb-1">البريد الإلكتروني لطلب التعيين</label>
+                        <div className="relative">
+                          <Mail className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="email"
+                            value={forgotEmailInput}
+                            onChange={(e) => setForgotEmailInput(e.target.value)}
+                            placeholder="your-email@gmail.com"
+                            className="w-full pr-9 pl-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-100 focus:outline-none focus:border-amber-500 dir-ltr text-right"
+                            required
+                          />
+                        </div>
                       </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={handleSendResetEmail}
+                        disabled={isSendingReset}
+                        className="flex-1 py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
+                      >
+                        {isSendingReset ? (
+                          <span>جاري البحث في البريد والسيرفر...</span>
+                        ) : (
+                          <>
+                            <Mail className="w-4 h-4" />
+                            <span>إرسال رابط التعيين والبحث عن الحساب</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsForgotPassword(false);
+                          setFoundUserForReset(null);
+                        }}
+                        className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition border border-slate-700"
+                      >
+                        إلغاء
+                      </button>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 pt-2">
-                    <button
-                      type="submit"
-                      disabled={isSendingReset}
-                      className="flex-1 py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
-                    >
-                      {isSendingReset ? (
-                        <span>جاري إرسال الرابط...</span>
-                      ) : (
-                        <>
-                          <Mail className="w-4 h-4" />
-                          <span>إرسال رابط إعادة التعيين للبريد</span>
-                        </>
-                      )}
-                    </button>
+                  {/* Instant On-Screen Password Recovery Card */}
+                  {foundUserForReset && (
+                    <div className="p-4 rounded-2xl bg-slate-950 border border-cyan-500/50 space-y-3 animate-fadeIn mt-3 text-xs">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+                          <UserCheck className="w-4 h-4 text-cyan-400" />
+                          تم العثور على حسابك ({foundUserForReset.email})
+                        </span>
+                      </div>
 
-                    <button
-                      type="button"
-                      onClick={() => setIsForgotPassword(false)}
-                      className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition border border-slate-700"
-                    >
-                      إلغاء
-                    </button>
-                  </div>
-                </form>
+                      {foundUserForReset.password && (
+                        <div className="flex items-center justify-between bg-slate-900 p-2.5 rounded-xl border border-slate-800">
+                          <span className="text-slate-400 font-semibold">كلمة المرور الحالية المسجلة:</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-amber-300 font-bold bg-slate-950 px-2.5 py-1 rounded-lg dir-ltr border border-slate-800">
+                              {showInstantPassView ? foundUserForReset.password : '••••••••'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowInstantPassView(!showInstantPassView)}
+                              className="p-1 text-slate-400 hover:text-slate-100 transition rounded hover:bg-slate-800"
+                              title={showInstantPassView ? "إخفاء" : "إظهار"}
+                            >
+                              {showInstantPassView ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2 pt-1">
+                        <label className="block font-bold text-slate-200">تعيين كلمة مرور جديدة ودخول الحساب فوراً:</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            value={instantNewPassInput}
+                            onChange={(e) => setInstantNewPassInput(e.target.value)}
+                            placeholder="اكتب كلمة المرور الجديدة..."
+                            className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-cyan-500 dir-ltr text-right"
+                            required
+                          />
+                          <button
+                            type="button"
+                            onClick={handleInstantResetSubmit}
+                            disabled={isSubmittingInstantReset}
+                            className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold rounded-xl transition shrink-0"
+                          >
+                            {isSubmittingInstantReset ? 'جاري الحفظ...' : 'حفظ ودخول الحساب'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}

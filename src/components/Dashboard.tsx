@@ -399,7 +399,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleCreateSubmit} className="p-6 overflow-y-auto space-y-5">
+            <div className="p-6 overflow-y-auto space-y-5">
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-1">عنوان الرواية / المشروع</label>
                 <input
@@ -495,12 +495,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
 
               <button
-                type="submit"
+                type="button"
+                onClick={handleCreateSubmit}
                 className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-amber-500/20 mt-2"
               >
                 إنشاء المشروع والبدء والتخطيط
               </button>
-            </form>
+            </div>
           </div>
         </div>
       )}
@@ -523,7 +524,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveProjectEdit} className="space-y-4 text-xs">
+            <div className="space-y-4 text-xs">
               <div>
                 <label className="block text-slate-300 font-bold mb-1.5">عنوان المشروع / الرواية</label>
                 <input
@@ -572,13 +573,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   إلغاء
                 </button>
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleSaveProjectEdit}
                   className="px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-lg shadow-cyan-500/20"
                 >
                   حفظ التعديلات
                 </button>
               </div>
-            </form>
+            </div>
           </div>
         </div>
       )}

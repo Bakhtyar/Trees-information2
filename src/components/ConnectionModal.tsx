@@ -110,7 +110,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSave} className="p-6 space-y-6">
+        <div className="p-6 space-y-6">
           {/* توضيح أطراف العلاقة */}
           {sourceNode && targetNode && (
             <div className="flex items-center justify-between p-3.5 bg-slate-800/60 rounded-2xl border border-slate-700/60 text-sm font-semibold">
@@ -280,14 +280,15 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
                 إلغاء
               </button>
               <button
-                type="submit"
+                type="button"
+                onClick={handleSave}
                 className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-sm font-bold shadow-lg transition"
               >
                 حفظ الرابط
               </button>
             </div>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );

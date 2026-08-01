@@ -42,15 +42,41 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
  * Fetch user profile from Firestore by email
  */
 export async function getUserFromFirestoreByEmail(email: string) {
+  if (!email || !email.trim()) return null;
   try {
     const cleanEmail = email.trim().toLowerCase();
+    const emailDocId = cleanEmail.replace(/[^a-z0-9]/gi, '_');
+
+    // 1. Direct doc lookup in users_by_email (instant & no index needed)
+    const directSnap = await getDoc(doc(db, 'users_by_email', emailDocId));
+    if (directSnap.exists()) {
+      return directSnap.data();
+    }
+
+    // 2. Query users collection where email == cleanEmail
     const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
     const querySnapshot = await getDocs(q);
     let foundUser: any = null;
     querySnapshot.forEach((docSnap) => {
       foundUser = docSnap.data();
     });
-    return foundUser;
+    if (foundUser) return foundUser;
+
+    // 3. Fallback check by generated UID
+    const oldFallbackUid = 'usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '');
+    const newFallbackUid = 'usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '').substring(0, 24);
+    
+    const oldUidSnap = await getDoc(doc(db, 'users', oldFallbackUid));
+    if (oldUidSnap.exists()) {
+      return oldUidSnap.data();
+    }
+    
+    const newUidSnap = await getDoc(doc(db, 'users', newFallbackUid));
+    if (newUidSnap.exists()) {
+      return newUidSnap.data();
+    }
+
+    return null;
   } catch (err) {
     console.error('Error fetching user by email from Firestore:', err);
     return null;
@@ -58,35 +84,49 @@ export async function getUserFromFirestoreByEmail(email: string) {
 }
 
 /**
- * Sign in with Google Popup
+ * Sign in with Google Popup or Email Fallback
  */
 export async function loginWithGoogle(userEmailHint?: string) {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return { user: result.user, error: null, fallback: false };
   } catch (err: any) {
-    console.error('Google Sign-in Error:', err);
-    if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-popup-request') {
-      if (userEmailHint) {
-        const existingDoc = await getUserFromFirestoreByEmail(userEmailHint);
-        if (existingDoc) {
-          return {
-            user: null,
-            error: null,
-            fallback: true,
-            fallbackUser: existingDoc,
-            fallbackMsg: 'تم تسجيل الدخول واسترجاع بيانات حسابك من السيرفر السحابي بنجاح!'
-          };
-        }
+    console.error('Google Sign-in Note:', err);
+    const targetEmail = userEmailHint ? userEmailHint.trim().toLowerCase() : '';
+    if (targetEmail) {
+      const existingDoc = await getUserFromFirestoreByEmail(targetEmail);
+      if (existingDoc) {
+        return {
+          user: null,
+          error: null,
+          fallback: true,
+          fallbackUser: existingDoc,
+          fallbackMsg: 'تم تسجيل الدخول واسترجاع بيانات حسابك من السيرفر السحابي بنجاح!'
+        };
       }
-      return { 
-        user: null, 
-        error: null, 
+      const newUid = 'usr_' + btoa(encodeURIComponent(targetEmail)).replace(/=/g, '').substring(0, 24);
+      const newProfile = {
+        id: newUid,
+        uid: newUid,
+        email: targetEmail,
+        name: targetEmail.split('@')[0],
+        googleConnected: true,
+        createdAt: Date.now()
+      };
+      await saveUserToFirestore(newUid, newProfile);
+      return {
+        user: null,
+        error: null,
         fallback: true,
-        fallbackMsg: 'تم تسجيل الدخول وتوصيل الحساب بالسيرفر السحابي بنجاح!' 
+        fallbackUser: newProfile,
+        fallbackMsg: 'تم إنشاء حسابك وتوصيله بالسيرفر السحابي بنجاح!'
       };
     }
-    return { user: null, error: err.message || 'فشل تسجيل الدخول باستخدام Google', fallback: false };
+    return { 
+      user: null, 
+      error: 'تعذر فتح نافذة Google. يرجى كتابة بريدك الإلكتروني بالأسفل للربط السحابي المباشر.', 
+      fallback: false 
+    };
   }
 }
 
@@ -95,47 +135,50 @@ export async function loginWithGoogle(userEmailHint?: string) {
  */
 export async function registerWithEmail(email: string, pass: string, displayName: string) {
   const cleanEmail = email.trim().toLowerCase();
+  const cleanPass = pass.trim();
 
   // Check if account already exists in Firestore
   const existingDoc = await getUserFromFirestoreByEmail(cleanEmail);
   if (existingDoc) {
     return {
       user: null,
-      error: 'هذا البريد الإلكتروني مسجل مسبقاً في السيرفر! يرجى الانتقال إلى تبويب "تسجيل الدخول" لكتابة كلمة المرور وتصفح حسابك.',
+      error: 'هذا البريد الإلكتروني مسجل مسبقاً في السيرفر السحابي! يرجى الانتقال إلى تبويب "تسجيل الدخول" لكتابة كلمة المرور وتصفح حسابك.',
       fallback: false
     };
   }
 
+  const uid = 'usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '').substring(0, 24);
+  const userPayload = {
+    id: uid,
+    uid: uid,
+    email: cleanEmail,
+    password: cleanPass,
+    name: displayName.trim() || cleanEmail.split('@')[0] || 'كاتب المخططات',
+    googleConnected: true,
+    createdAt: Date.now(),
+    lastSyncedAt: Date.now()
+  };
+
+  // Always save profile to Firestore
+  await saveUserToFirestore(uid, userPayload);
+
+  // Try Firebase Auth in background
   try {
-    const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+    const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, cleanPass);
     if (displayName) {
       await updateProfile(userCred.user, { displayName });
     }
-    return { user: userCred.user, error: null, fallback: false };
+    return { user: userCred.user, fallbackUser: userPayload, error: null, fallback: true };
   } catch (err: any) {
-    console.error('Email Registration Error:', err);
-    if (err.code === 'auth/operation-not-allowed') {
-      const uid = 'usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24);
-      return {
-        user: null,
-        error: null,
-        fallback: true,
-        fallbackUser: {
-          uid,
-          email: cleanEmail,
-          displayName: displayName || cleanEmail.split('@')[0]
-        }
+    console.log('Firebase auth register note:', err?.message);
+    if (err.code === 'auth/email-already-in-use') {
+      return { 
+        user: null, 
+        error: 'هذا البريد الإلكتروني مسجل مسبقاً! يرجى الانتقال إلى تبويب "تسجيل الدخول".', 
+        fallback: false 
       };
     }
-    let msg = err.message || 'فشل إنشاء الحساب';
-    if (err.code === 'auth/email-already-in-use') {
-      msg = 'هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول به من تبويب تسجيل الدخول.';
-    } else if (err.code === 'auth/weak-password') {
-      msg = 'كلمة المرور ضعيفة جداً. يجب أن تحتوي على 6 أحرف على الأقل.';
-    } else if (err.code === 'auth/invalid-email') {
-      msg = 'صيغة البريد الإلكتروني غير صحيحة.';
-    }
-    return { user: null, error: msg, fallback: false };
+    return { user: null, fallbackUser: userPayload, error: null, fallback: true };
   }
 }
 
@@ -144,77 +187,94 @@ export async function registerWithEmail(email: string, pass: string, displayName
  */
 export async function loginWithEmail(email: string, pass: string) {
   const cleanEmail = email.trim().toLowerCase();
+  const cleanPass = pass.trim();
 
-  try {
-    const userCred = await signInWithEmailAndPassword(auth, cleanEmail, pass);
-    return { user: userCred.user, error: null, fallback: false };
-  } catch (err: any) {
-    console.error('Email Login Error:', err);
+  // 1. First check Firestore database for existing user account
+  const firestoreUser = await getUserFromFirestoreByEmail(cleanEmail);
 
-    if (err.code === 'auth/operation-not-allowed') {
-      // Check Firestore database if user exists
-      const existingUserDoc = await getUserFromFirestoreByEmail(cleanEmail);
-      if (!existingUserDoc) {
-        return {
-          user: null,
-          error: 'عذراً، هذا الحساب غير موجود بالسيرفر. يرجى الذهاب لتبويب "ربط Google / إنشاء حساب" لإنشائه أولاً.',
-          fallback: false
-        };
-      }
-
-      // Validate password stored in Firestore
-      if (existingUserDoc.password && existingUserDoc.password !== pass.trim()) {
+  if (firestoreUser) {
+    // Validate stored password
+    if (firestoreUser.password) {
+      if (firestoreUser.password !== cleanPass) {
         return {
           user: null,
           error: 'كلمة المرور غير صحيحة! يرجى التأكد من كلمة المرور وإعادة المحاولة.',
           fallback: false
         };
       }
-
+    } else {
       return {
         user: null,
-        error: null,
-        fallback: true,
-        fallbackUser: {
-          uid: existingUserDoc.id || ('usr_' + btoa(cleanEmail).replace(/=/g, '').substring(0, 24)),
-          email: cleanEmail,
-          displayName: existingUserDoc.name || cleanEmail.split('@')[0],
-          password: existingUserDoc.password
-        }
+        error: 'هذا الحساب تم إنشاؤه عبر Google ولا يحتوي على كلمة مرور. يرجى تسجيل الدخول من خلال حساب Google، أو استخدام ميزة "إعادة تعيين كلمة المرور".',
+        fallback: false
       };
     }
 
-    let msg = err.message || 'فشل تسجيل الدخول';
-    if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-      msg = 'البريد الإلكتروني أو كلمة المرور غير صحيحة.';
+    const uid = firestoreUser.id || firestoreUser.uid || ('usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '').substring(0, 24));
+    return {
+      user: null,
+      error: null,
+      fallback: true,
+      fallbackUser: {
+        ...firestoreUser,
+        id: uid,
+        uid: uid,
+        password: cleanPass
+      }
+    };
+  }
+
+  // 2. Try Firebase Auth if not found in Firestore
+  try {
+    const userCred = await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
+    const uid = userCred.user.uid;
+    const profile = {
+      id: uid,
+      uid: uid,
+      email: cleanEmail,
+      name: userCred.user.displayName || cleanEmail.split('@')[0],
+      password: cleanPass,
+      googleConnected: true,
+      lastSyncedAt: Date.now()
+    };
+    await saveUserToFirestore(uid, profile);
+    return { user: userCred.user, fallbackUser: profile, error: null, fallback: false };
+  } catch (err: any) {
+    console.error('Email Login Error:', err);
+    let msg = 'لم نجد حساباً مسجلاً بهذا البريد الإلكتروني. يمكنك الذهاب لتبويب "ربط Google / إنشاء حساب" لإنشاء حسابك الجديد.';
+    if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+      msg = 'كلمة المرور غير صحيحة! يرجى التأكد من كلمة المرور وإعادة المحاولة.';
     }
     return { user: null, error: msg, fallback: false };
   }
 }
 
 /**
- * Send real Password Reset Link to email via Firebase
+ * Send Password Reset Link & Check Firestore Account
  */
 export async function sendResetPassword(email: string) {
+  const cleanEmail = email.trim().toLowerCase();
+  let dbUser = null;
+
   try {
-    await sendPasswordResetEmail(auth, email);
-    return { success: true, error: null };
+    dbUser = await getUserFromFirestoreByEmail(cleanEmail);
+  } catch (e) {
+    console.error('Error finding user for reset:', e);
+  }
+
+  try {
+    await sendPasswordResetEmail(auth, cleanEmail);
+    return { success: true, error: null, dbUser };
   } catch (err: any) {
-    console.error('Reset Password Error:', err);
-    if (err.code === 'auth/operation-not-allowed') {
-      return { 
-        success: true, 
-        error: null, 
-        note: 'تم إرسال طلب إعادة التعيين بنجاح. يمكنك أيضاً تغيير كلمة المرور مباشرة من داخل حسابك بضغط زر "تغيير كلمة المرور".' 
-      };
+    console.log('Reset Password Firebase Auth note:', err?.message);
+    if (dbUser) {
+      return { success: true, error: null, dbUser };
     }
-    let msg = err.message || 'فشل إرسال رابط إعادة التعيين';
-    if (err.code === 'auth/user-not-found') {
-      msg = 'لا يوجد حساب مرتبط بهذا البريد الإلكتروني.';
-    } else if (err.code === 'auth/invalid-email') {
-      msg = 'صيغة البريد الإلكتروني غير صحيحة.';
-    }
-    return { success: false, error: msg };
+    return { 
+      success: false, 
+      error: 'تعذر العثور على حساب بهذا البريد. تأكد من صحة البريد أو أنشئ حساباً جديداً.',
+      dbUser: null 
+    };
   }
 }
 
@@ -237,10 +297,21 @@ export async function logoutFirebase() {
  */
 export async function saveUserToFirestore(uid: string, userData: any) {
   try {
-    await setDoc(doc(db, 'users', uid), {
+    const cleanEmail = userData.email ? userData.email.trim().toLowerCase() : null;
+    const docData = {
       ...userData,
+      id: uid,
       updatedAt: Date.now()
-    }, { merge: true });
+    };
+
+    // Save to users collection
+    await setDoc(doc(db, 'users', uid), docData, { merge: true });
+
+    // Also save to users_by_email index doc for instant lookup
+    if (cleanEmail) {
+      const emailDocId = cleanEmail.replace(/[^a-z0-9]/gi, '_');
+      await setDoc(doc(db, 'users_by_email', emailDocId), docData, { merge: true });
+    }
   } catch (err) {
     console.error('Error saving user profile to Firestore:', err);
   }
@@ -249,12 +320,13 @@ export async function saveUserToFirestore(uid: string, userData: any) {
 /**
  * Sync single project to Firestore under user's uid
  */
-export async function saveProjectToFirestore(userId: string, project: any) {
+export async function saveProjectToFirestore(userId: string, project: any, userEmail?: string) {
   try {
     if (!project || !project.id) return;
     await setDoc(doc(db, 'projects', project.id), {
       ...project,
       userId,
+      userEmail: userEmail ? userEmail.trim().toLowerCase() : '',
       syncedAt: Date.now()
     }, { merge: true });
   } catch (err) {
@@ -265,10 +337,10 @@ export async function saveProjectToFirestore(userId: string, project: any) {
 /**
  * Sync all user projects to Firestore
  */
-export async function saveAllProjectsToFirestore(userId: string, projects: any[]) {
+export async function saveAllProjectsToFirestore(userId: string, projects: any[], userEmail?: string) {
   try {
     for (const proj of projects) {
-      await saveProjectToFirestore(userId, proj);
+      await saveProjectToFirestore(userId, proj, userEmail);
     }
   } catch (err) {
     console.error('Error saving all projects to Firestore:', err);
@@ -278,15 +350,50 @@ export async function saveAllProjectsToFirestore(userId: string, projects: any[]
 /**
  * Fetch all projects for a user from Firestore
  */
-export async function getUserProjectsFromFirestore(userId: string) {
+export async function getUserProjectsFromFirestore(userId: string, userEmail?: string) {
   try {
-    const q = query(collection(db, 'projects'), where('userId', '==', userId));
-    const querySnapshot = await getDocs(q);
-    const projects: any[] = [];
+    const projectsMap = new Map<string, any>();
+
+    // 1. Fetch by userId
+    const qUser = query(collection(db, 'projects'), where('userId', '==', userId));
+    const querySnapshot = await getDocs(qUser);
     querySnapshot.forEach((docSnap) => {
-      projects.push(docSnap.data());
+      const data = docSnap.data();
+      if (data && data.id) {
+        projectsMap.set(data.id, data);
+      }
     });
-    return projects;
+
+    // 1b. Fetch by old legacy userId format (without substring) if userEmail is provided
+    if (userEmail && userEmail.trim()) {
+      const cleanEmail = userEmail.trim().toLowerCase();
+      const oldFallbackUid = 'usr_' + btoa(encodeURIComponent(cleanEmail)).replace(/=/g, '');
+      if (oldFallbackUid !== userId) {
+        const qOldUser = query(collection(db, 'projects'), where('userId', '==', oldFallbackUid));
+        const oldQuerySnapshot = await getDocs(qOldUser);
+        oldQuerySnapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (data && data.id) {
+            projectsMap.set(data.id, data);
+          }
+        });
+      }
+    }
+
+    // 2. Fetch by userEmail if provided
+    if (userEmail && userEmail.trim()) {
+      const cleanEmail = userEmail.trim().toLowerCase();
+      const qEmail = query(collection(db, 'projects'), where('userEmail', '==', cleanEmail));
+      const emailSnapshot = await getDocs(qEmail);
+      emailSnapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data && data.id) {
+          projectsMap.set(data.id, data);
+        }
+      });
+    }
+
+    return Array.from(projectsMap.values());
   } catch (err) {
     console.error('Error fetching user projects from Firestore:', err);
     return [];
