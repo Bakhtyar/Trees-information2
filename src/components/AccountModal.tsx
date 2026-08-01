@@ -129,36 +129,39 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   const handleDirectGoogleLogin = async () => {
     setIsLinking(true);
     setRestoreStatus(null);
-    const { user: firebaseUser, error } = await loginWithGoogle();
+    const res = await loginWithGoogle();
     setIsLinking(false);
 
-    if (error || !firebaseUser) {
+    let uid = res.user?.uid;
+    let cleanEmail = res.user?.email || user.email || 'author@gmail.com';
+    let cleanName = res.user?.displayName || user.name || cleanEmail.split('@')[0] || 'كاتب المخططات';
+
+    if (res.fallback) {
+      uid = user.id || 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
+    } else if (res.error || !res.user) {
       setRestoreStatus({
         type: 'error',
-        msg: error || 'فشل تسجيل الدخول المباشر باستخدام Google'
+        msg: res.error || 'فشل تسجيل الدخول المباشر باستخدام Google'
       });
       return;
     }
 
-    const cleanEmail = firebaseUser.email || 'author@gmail.com';
-    const cleanName = firebaseUser.displayName || cleanEmail.split('@')[0] || 'كاتب المخططات';
-
     const updatedProfile: UserProfile = {
-      id: firebaseUser.uid,
+      id: uid!,
       name: cleanName,
       email: cleanEmail,
       googleConnected: true,
       lastSyncedAt: Date.now(),
-      avatar: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
+      avatar: res.user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
     };
 
     saveUserProfile(updatedProfile);
     onUpdateUser(updatedProfile);
-    await saveUserToFirestore(firebaseUser.uid, updatedProfile);
+    await saveUserToFirestore(uid!, updatedProfile);
 
     // Sync local projects to Firestore
     const localProjects = loadAllProjects();
-    await saveAllProjectsToFirestore(firebaseUser.uid, localProjects);
+    await saveAllProjectsToFirestore(uid!, localProjects);
 
     setRestoreStatus({
       type: 'success',
@@ -185,23 +188,20 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     const cleanName = googleNameInput.trim() || 'كاتب المخططات';
 
     // Try register in Firebase
-    const { user: firebaseUser, error } = await registerWithEmail(cleanEmail, googlePasswordInput, cleanName);
+    const regRes = await registerWithEmail(cleanEmail, googlePasswordInput, cleanName);
 
-    if (error && !error.includes('مستخدم بالفعل')) {
-      setIsLinking(false);
-      setRestoreStatus({
-        type: 'error',
-        msg: error
-      });
-      return;
-    }
+    let finalUid = 'usr_' + btoa(cleanEmail.toLowerCase()).replace(/=/g, '');
 
-    // If email already in use, try logging in
-    let finalUid = firebaseUser ? firebaseUser.uid : user.id || 'user_' + Date.now();
-    if (!firebaseUser && error && error.includes('مستخدم بالفعل')) {
+    if (regRes.user) {
+      finalUid = regRes.user.uid;
+    } else if (regRes.fallback && regRes.fallbackUser) {
+      finalUid = regRes.fallbackUser.uid;
+    } else if (regRes.error && regRes.error.includes('مستخدم بالفعل')) {
       const loginRes = await loginWithEmail(cleanEmail, googlePasswordInput);
       if (loginRes.user) {
         finalUid = loginRes.user.uid;
+      } else if (loginRes.fallback && loginRes.fallbackUser) {
+        finalUid = loginRes.fallbackUser.uid;
       } else {
         setIsLinking(false);
         setRestoreStatus({
@@ -210,6 +210,13 @@ export const AccountModal: React.FC<AccountModalProps> = ({
         });
         return;
       }
+    } else if (regRes.error) {
+      setIsLinking(false);
+      setRestoreStatus({
+        type: 'error',
+        msg: regRes.error
+      });
+      return;
     }
 
     setIsLinking(false);
@@ -256,35 +263,43 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     setRestoreStatus(null);
 
     const cleanEmail = loginEmailInput.trim();
-    const { user: firebaseUser, error } = await loginWithEmail(cleanEmail, loginPasswordInput);
+    const loginRes = await loginWithEmail(cleanEmail, loginPasswordInput);
 
     setIsLoggingIn(false);
 
-    if (error || !firebaseUser) {
+    let finalUid: string | null = null;
+    let nameFromEmail = cleanEmail.split('@')[0] || 'كاتب الرواية';
+
+    if (loginRes.user) {
+      finalUid = loginRes.user.uid;
+      nameFromEmail = loginRes.user.displayName || nameFromEmail;
+    } else if (loginRes.fallback && loginRes.fallbackUser) {
+      finalUid = loginRes.fallbackUser.uid;
+    } else if (loginRes.error) {
       setRestoreStatus({
         type: 'error',
-        msg: error || 'فشل تسجيل الدخول. تحقق من البريد وكلمة المرور.'
+        msg: loginRes.error || 'فشل تسجيل الدخول. تحقق من البريد وكلمة المرور.'
       });
       return;
     }
 
-    const nameFromEmail = firebaseUser.displayName || cleanEmail.split('@')[0] || 'كاتب الرواية';
+    if (!finalUid) return;
 
     const loggedInProfile: UserProfile = {
-      id: firebaseUser.uid,
+      id: finalUid,
       name: nameFromEmail,
       email: cleanEmail,
       password: loginPasswordInput.trim(),
       googleConnected: true,
       lastSyncedAt: Date.now(),
-      avatar: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
+      avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
     };
 
     saveUserProfile(loggedInProfile);
     onUpdateUser(loggedInProfile);
 
     // Download user's projects from Firestore server
-    const remoteProjects = await getUserProjectsFromFirestore(firebaseUser.uid);
+    const remoteProjects = await getUserProjectsFromFirestore(finalUid);
     if (remoteProjects && remoteProjects.length > 0) {
       for (const proj of remoteProjects) {
         saveProject(proj);
