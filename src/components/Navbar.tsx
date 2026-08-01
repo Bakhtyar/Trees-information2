@@ -16,12 +16,20 @@ import {
   Sparkles, 
   RefreshCw, 
   PlusSquare,
-  ChevronDown
+  ChevronDown,
+  Home,
+  User,
+  Cloud,
+  Undo2,
+  Redo2
 } from 'lucide-react';
-import { StoryProject } from '../types/story';
+import { StoryProject, UserProfile } from '../types/story';
 
 interface NavbarProps {
   project: StoryProject;
+  userProfile?: UserProfile;
+  onNavigateHome?: () => void;
+  onOpenAccountModal?: () => void;
   onUpdateTitle: (newTitle: string) => void;
   onUpdateDescription: (newDesc: string) => void;
   onOpenSearch: () => void;
@@ -34,10 +42,17 @@ interface NavbarProps {
   onToggleTheme: () => void;
   saveStatus: 'saved' | 'saving' | 'error';
   onLoadTemplate: (type: 'detective' | 'blank') => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   project,
+  userProfile,
+  onNavigateHome,
+  onOpenAccountModal,
   onUpdateTitle,
   onUpdateDescription,
   onOpenSearch,
@@ -49,7 +64,11 @@ export const Navbar: React.FC<NavbarProps> = ({
   isDark,
   onToggleTheme,
   saveStatus,
-  onLoadTemplate
+  onLoadTemplate,
+  onUndo,
+  onRedo,
+  canUndo = false,
+  canRedo = false
 }) => {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(project.title);
@@ -67,11 +86,18 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="h-16 border-b border-slate-800/80 bg-slate-900/90 backdrop-blur-md px-4 flex items-center justify-between gap-3 z-30 select-none shadow-sm shrink-0">
-      {/* اليمين: عنوان المشروع وحالة الحفظ */}
+      {/* اليمين: زر الرئيسية وعنوان المشروع وحالة الحفظ */}
       <div className="flex items-center gap-3 min-w-0">
-        <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-amber-700 text-slate-950 shadow-md shadow-amber-500/20 shrink-0 font-extrabold text-lg">
-          ر
-        </div>
+        {onNavigateHome && (
+          <button
+            onClick={onNavigateHome}
+            className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl shadow-md shadow-amber-500/20 transition shrink-0"
+            title="العودة للواجهة الرئيسية والمشاريع"
+          >
+            <Home className="w-4 h-4" />
+            <span className="hidden sm:inline">الرئيسية</span>
+          </button>
+        )}
         
         <div className="flex flex-col min-w-0">
           <div className="flex items-center gap-2">
@@ -125,6 +151,22 @@ export const Navbar: React.FC<NavbarProps> = ({
           </kbd>
         </button>
 
+        {/* زر الحساب والتزامن السحابي في الهيدر */}
+        {onOpenAccountModal && userProfile && (
+          <button
+            onClick={onOpenAccountModal}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold transition ${
+              userProfile.googleConnected
+                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/50'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+            }`}
+            title="إدارة الحساب والنسخ السحابي"
+          >
+            <Cloud className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden lg:inline">{userProfile.googleConnected ? 'Google متصل' : 'نسخ سحابي'}</span>
+          </button>
+        )}
+
         {/* قائمة قوالب جاهزة */}
         <div className="relative" ref={menuRef}>
           <button
@@ -162,8 +204,41 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* اليسار: أدوات التحكم في التكبير، التصدير، ودليل الاستخدام */}
+      {/* اليسار: أدوات التحكم في التراجع/الإعادة، التكبير، التصدير، ودليل الاستخدام */}
       <div className="flex items-center gap-1.5 sm:gap-2">
+        {/* أزرار التراجع والإعادة (Undo & Redo) */}
+        <div className="flex items-center bg-slate-800/80 border border-slate-700/70 rounded-xl px-1 py-0.5">
+          <button
+            onClick={onUndo}
+            disabled={!canUndo}
+            className={`p-1.5 rounded-lg transition flex items-center gap-1 text-xs font-bold ${
+              canUndo
+                ? 'hover:bg-slate-700 text-amber-400 hover:text-amber-300'
+                : 'text-slate-600 cursor-not-allowed opacity-40'
+            }`}
+            title="تراجع عن خطوة (Ctrl+Z) - استرجاع المحذوف أو السابق"
+          >
+            <Undo2 className="w-4 h-4" />
+            <span className="hidden xl:inline">تراجع</span>
+          </button>
+
+          <div className="w-[1px] h-4 bg-slate-700/80 mx-0.5" />
+
+          <button
+            onClick={onRedo}
+            disabled={!canRedo}
+            className={`p-1.5 rounded-lg transition flex items-center gap-1 text-xs font-bold ${
+              canRedo
+                ? 'hover:bg-slate-700 text-cyan-400 hover:text-cyan-300'
+                : 'text-slate-600 cursor-not-allowed opacity-40'
+            }`}
+            title="إعادة للتقدم (Ctrl+Y) - الرجوع لنفس النقطة عند التراجع بالغلط"
+          >
+            <Redo2 className="w-4 h-4" />
+            <span className="hidden xl:inline">إعادة</span>
+          </button>
+        </div>
+
         {/* أزرار التكبير */}
         <div className="hidden sm:flex items-center bg-slate-800/80 border border-slate-700/70 rounded-xl px-1 py-0.5">
           <button

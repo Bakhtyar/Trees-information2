@@ -205,10 +205,22 @@ export interface StoryConnection {
   createdAt: number;
 }
 
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  avatar?: string;
+  googleConnected: boolean;
+  createdAt: number;
+  lastSyncedAt: number;
+}
+
 export interface StoryProject {
   id: string;
   title: string;
   description: string;
+  genre?: string;
+  createdAt?: number;
   nodes: StoryNode[];
   connections: StoryConnection[];
   canvasView: {

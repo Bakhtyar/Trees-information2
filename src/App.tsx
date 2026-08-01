@@ -4,13 +4,26 @@ import {
   StoryNode, 
   StoryConnection, 
   NodeCategory, 
-  NODE_CATEGORIES 
+  NODE_CATEGORIES,
+  UserProfile
 } from './types/story';
 import { 
   loadProject, 
-  saveProject 
+  saveProject,
+  loadAllProjects,
+  saveAllProjects,
+  getActiveProjectId,
+  setActiveProjectId,
+  createNewProject,
+  duplicateProject,
+  deleteProject,
+  getUserProfile,
+  saveUserProfile,
+  exportToJSON
 } from './utils/storage';
 import { SAMPLE_DETECTIVE_PROJECT, BLANK_PROJECT_TEMPLATE } from './utils/sampleProject';
+import { Dashboard } from './components/Dashboard';
+import { AccountModal } from './components/AccountModal';
 import { Navbar } from './components/Navbar';
 import { Toolbar, CanvasMode } from './components/Toolbar';
 import { Canvas } from './components/Canvas';
@@ -21,12 +34,18 @@ import { ExportImportModal } from './components/ExportImportModal';
 import { GuideModal } from './components/GuideModal';
 
 export default function App() {
-  const [project, setProject] = useState<StoryProject>(() => loadProject());
+  const [view, setView] = useState<'dashboard' | 'editor'>('dashboard');
+  const [projectsList, setProjectsList] = useState<StoryProject[]>(() => loadAllProjects());
+  const [activeId, setActiveId] = useState<string>(() => getActiveProjectId());
+  const [project, setProject] = useState<StoryProject>(() => loadProject(activeId));
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => getUserProfile());
+
   const [isDark, setIsDark] = useState<boolean>(true);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
 
   // Interactive modes & Selection state
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('select');
+  const [showCoordinates, setShowCoordinates] = useState<boolean>(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
 
@@ -46,12 +65,145 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isExportImportOpen, setIsExportImportOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
 
   // Dragging state for toolbar tools (supports touch)
   const [draggingTool, setDraggingTool] = useState<{type: NodeCategory, x: number, y: number} | null>(null);
 
+  // History Undo/Redo Stacks
+  const [undoStack, setUndoStack] = useState<StoryProject[]>([]);
+  const [redoStack, setRedoStack] = useState<StoryProject[]>([]);
+  const isDraggingNodeRef = useRef(false);
+  const dragTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   // Auto-save debounce ref
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Refresh projects list from storage
+  const refreshProjectsList = useCallback(() => {
+    const list = loadAllProjects();
+    setProjectsList(list);
+    setUserProfile(getUserProfile());
+  }, []);
+
+  // History Recording Helper
+  const pushToUndoHistory = useCallback((projToPush: StoryProject) => {
+    setUndoStack((prev) => {
+      if (
+        prev.length > 0 &&
+        JSON.stringify(prev[prev.length - 1].nodes) === JSON.stringify(projToPush.nodes) &&
+        JSON.stringify(prev[prev.length - 1].connections) === JSON.stringify(projToPush.connections) &&
+        prev[prev.length - 1].title === projToPush.title &&
+        prev[prev.length - 1].description === projToPush.description
+      ) {
+        return prev;
+      }
+      const updated = [...prev, JSON.parse(JSON.stringify(projToPush))];
+      if (updated.length > 35) updated.shift();
+      return updated;
+    });
+    setRedoStack([]);
+  }, []);
+
+  // Handle Undo
+  const handleUndo = useCallback(() => {
+    setUndoStack((prevUndo) => {
+      if (prevUndo.length === 0) return prevUndo;
+      const targetState = prevUndo[prevUndo.length - 1];
+      const newUndoStack = prevUndo.slice(0, -1);
+
+      setRedoStack((prevRedo) => [...prevRedo, JSON.parse(JSON.stringify(project))]);
+
+      setProject(targetState);
+      saveProject(targetState);
+      refreshProjectsList();
+      return newUndoStack;
+    });
+  }, [project, refreshProjectsList]);
+
+  // Handle Redo
+  const handleRedo = useCallback(() => {
+    setRedoStack((prevRedo) => {
+      if (prevRedo.length === 0) return prevRedo;
+      const targetState = prevRedo[prevRedo.length - 1];
+      const newRedoStack = prevRedo.slice(0, -1);
+
+      setUndoStack((prevUndo) => [...prevUndo, JSON.parse(JSON.stringify(project))]);
+
+      setProject(targetState);
+      saveProject(targetState);
+      refreshProjectsList();
+      return newRedoStack;
+    });
+  }, [project, refreshProjectsList]);
+
+  // Switch Active Project
+  const handleSelectProject = (projectId: string) => {
+    setActiveProjectId(projectId);
+    setActiveId(projectId);
+    const target = loadProject(projectId);
+    setProject(target);
+    setUndoStack([]);
+    setRedoStack([]);
+    setView('editor');
+  };
+
+  // Create Project
+  const handleCreateProject = (
+    title: string, 
+    description: string, 
+    genre: string, 
+    template: 'blank' | 'detective' | 'scifi' | 'fantasy'
+  ) => {
+    const created = createNewProject(title, description, genre, template);
+    refreshProjectsList();
+    setProject(created);
+    setActiveId(created.id);
+    setUndoStack([]);
+    setRedoStack([]);
+    setView('editor');
+  };
+
+  // Duplicate Project
+  const handleDuplicateProject = (projectId: string) => {
+    duplicateProject(projectId);
+    refreshProjectsList();
+  };
+
+  // Update Project Details (Title, Description, Genre)
+  const handleUpdateProjectDetails = (
+    projectId: string, 
+    title: string, 
+    description: string, 
+    genre: string
+  ) => {
+    const list = loadAllProjects();
+    const target = list.find(p => p.id === projectId);
+    if (target) {
+      const updatedProject: StoryProject = {
+        ...target,
+        title,
+        description,
+        genre,
+        lastSavedAt: Date.now()
+      };
+      saveProject(updatedProject);
+      refreshProjectsList();
+      if (activeId === projectId) {
+        setProject(updatedProject);
+      }
+    }
+  };
+
+  // Delete Project
+  const handleDeleteProject = (projectId: string) => {
+    const updated = deleteProject(projectId);
+    setProjectsList(updated);
+    if (activeId === projectId && updated.length > 0) {
+      setActiveId(updated[0].id);
+      setProject(updated[0]);
+    }
+  };
 
   const persistProject = useCallback((newProject: StoryProject) => {
     setProject(newProject);
@@ -62,8 +214,9 @@ export default function App() {
     saveTimeoutRef.current = setTimeout(() => {
       const ok = saveProject(newProject);
       setSaveStatus(ok ? 'saved' : 'error');
+      refreshProjectsList();
     }, 400);
-  }, []);
+  }, [refreshProjectsList]);
 
   // Sync dark class on HTML tag
   useEffect(() => {
@@ -115,17 +268,31 @@ export default function App() {
     });
   }, [project, persistProject]);
 
-  // Keyboard shortcut Ctrl+K for search
+  // Keyboard shortcut Ctrl+K for search, Ctrl+Z for Undo, Ctrl+Y or Ctrl+Shift+Z for Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      const activeEl = document.activeElement as HTMLElement;
+      if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)) {
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setIsSearchOpen(true);
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleUndo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [handleUndo, handleRedo]);
 
   // --- Handlers for Nodes ---
   // Pointer drag and drop support for toolbar on touch devices
@@ -165,6 +332,7 @@ export default function App() {
   }, [draggingTool, project.canvasView]);
 
   const handleAddNode = (type: NodeCategory) => {
+    pushToUndoHistory(project);
     const cat = NODE_CATEGORIES[type] || NODE_CATEGORIES.note;
     // Calculate center of screen in world coordinates
     const screenW = window.innerWidth;
@@ -204,6 +372,7 @@ export default function App() {
     y: number,
     connectFromNodeId?: string
   ) => {
+    pushToUndoHistory(project);
     const cat = NODE_CATEGORIES[type] || NODE_CATEGORIES.box;
     const newNodeId = 'node-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6);
     const newNode: StoryNode = {
@@ -245,17 +414,43 @@ export default function App() {
     setSelectedNodeId(newNodeId);
   };
 
-  const handleMoveNode = (nodeId: string, newX: number, newY: number) => {
-    const nextNodes = project.nodes.map((n) =>
-      n.id === nodeId ? { ...n, x: newX, y: newY, updatedAt: Date.now() } : n
-    );
-    persistProject({
-      ...project,
-      nodes: nextNodes
+  const handleMoveNode = useCallback((nodeId: string, newX: number, newY: number) => {
+    if (!isDraggingNodeRef.current) {
+      isDraggingNodeRef.current = true;
+      pushToUndoHistory(project);
+    }
+    if (dragTimeoutRef.current) {
+      clearTimeout(dragTimeoutRef.current);
+    }
+    dragTimeoutRef.current = setTimeout(() => {
+      isDraggingNodeRef.current = false;
+    }, 600);
+
+    setProject((prev) => {
+      let changed = false;
+      const nextNodes = prev.nodes.map((n) => {
+        if (n.id === nodeId) {
+          if (n.x === newX && n.y === newY) return n;
+          changed = true;
+          return { ...n, x: newX, y: newY, updatedAt: Date.now() };
+        }
+        return n;
+      });
+      if (!changed) return prev;
+      const nextProject = { ...prev, nodes: nextNodes };
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+      saveTimeoutRef.current = setTimeout(() => {
+        const ok = saveProject(nextProject);
+        setSaveStatus(ok ? 'saved' : 'error');
+      }, 500);
+      return nextProject;
     });
-  };
+  }, [project, pushToUndoHistory]);
 
   const handleSaveNode = (updatedNode: StoryNode) => {
+    pushToUndoHistory(project);
     const nextNodes = project.nodes.map((n) =>
       n.id === updatedNode.id ? updatedNode : n
     );
@@ -267,6 +462,7 @@ export default function App() {
   };
 
   const handleDeleteNode = (nodeId: string) => {
+    pushToUndoHistory(project);
     const nextNodes = project.nodes.filter((n) => n.id !== nodeId);
     const nextConns = project.connections.filter(
       (c) => c.fromNodeId !== nodeId && c.toNodeId !== nodeId
@@ -303,6 +499,7 @@ export default function App() {
   };
 
   const handleSaveConnection = (conn: StoryConnection) => {
+    pushToUndoHistory(project);
     const exists = project.connections.some((c) => c.id === conn.id);
     const nextConns = exists
       ? project.connections.map((c) => (c.id === conn.id ? conn : c))
@@ -316,6 +513,7 @@ export default function App() {
   };
 
   const handleDeleteConnection = (connectionId: string) => {
+    pushToUndoHistory(project);
     const nextConns = project.connections.filter((c) => c.id !== connectionId);
     persistProject({
       ...project,
@@ -353,6 +551,7 @@ export default function App() {
       return;
     }
 
+    pushToUndoHistory(project);
     const targetProject = type === 'detective' ? SAMPLE_DETECTIVE_PROJECT : BLANK_PROJECT_TEMPLATE;
     const newProject: StoryProject = {
       ...targetProject,
@@ -365,6 +564,7 @@ export default function App() {
   };
 
   const handleUpdateNode = (updatedNode: StoryNode) => {
+    pushToUndoHistory(project);
     const nextNodes = project.nodes.map((n) =>
       n.id === updatedNode.id ? updatedNode : n
     );
@@ -375,6 +575,7 @@ export default function App() {
   };
 
   const handleUpdateConnection = (updatedConn: StoryConnection) => {
+    pushToUndoHistory(project);
     const nextConns = project.connections.map((c) =>
       c.id === updatedConn.id ? updatedConn : c
     );
@@ -384,11 +585,47 @@ export default function App() {
     });
   };
 
+  if (view === 'dashboard') {
+    return (
+      <>
+        <Dashboard
+          projects={projectsList}
+          activeProjectId={activeId}
+          onSelectProject={handleSelectProject}
+          onCreateProject={handleCreateProject}
+          onUpdateProjectDetails={handleUpdateProjectDetails}
+          onDuplicateProject={handleDuplicateProject}
+          onDeleteProject={handleDeleteProject}
+          onExportProject={exportToJSON}
+          userProfile={userProfile}
+          onOpenAccountModal={() => setIsAccountModalOpen(true)}
+          isDark={isDark}
+          onToggleTheme={() => setIsDark(!isDark)}
+        />
+
+        <AccountModal
+          isOpen={isAccountModalOpen}
+          onClose={() => setIsAccountModalOpen(false)}
+          user={userProfile}
+          onUpdateUser={(u) => setUserProfile(u)}
+          onRefreshProjects={refreshProjectsList}
+          projectsCount={projectsList.length}
+        />
+      </>
+    );
+  }
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-['Cairo',sans-serif] select-none">
       {/* الشريط العلوي */}
       <Navbar
         project={project}
+        userProfile={userProfile}
+        onNavigateHome={() => {
+          refreshProjectsList();
+          setView('dashboard');
+        }}
+        onOpenAccountModal={() => setIsAccountModalOpen(true)}
         onUpdateTitle={(newTitle) => persistProject({ ...project, title: newTitle })}
         onUpdateDescription={(newDesc) => persistProject({ ...project, description: newDesc })}
         onOpenSearch={() => setIsSearchOpen(true)}
@@ -408,7 +645,7 @@ export default function App() {
             ...project,
             canvasView: {
               ...project.canvasView,
-              zoom: Math.max(project.canvasView.zoom * 0.85, 0.25)
+              zoom: Math.max(project.canvasView.zoom * 0.85, 0.02)
             }
           })
         }
@@ -417,6 +654,10 @@ export default function App() {
         onToggleTheme={() => setIsDark(!isDark)}
         saveStatus={saveStatus}
         onLoadTemplate={handleLoadTemplate}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
       />
 
       {/* منطقة مساحة العمل اللانهائية واللوحة */}
@@ -443,6 +684,7 @@ export default function App() {
           onStartConnectionBetween={handleStartConnectionBetween}
           onAddNodeAtPosition={handleAddNodeAtPosition}
           isDark={isDark}
+          showCoordinates={showCoordinates}
         />
 
         {/* شريط الأدوات العائم لإضافة المربعات وتغيير وضع العمل */}
@@ -454,6 +696,12 @@ export default function App() {
           nodeCount={project.nodes.length}
           connectionCount={project.connections.length}
           onDragToolStart={(type, x, y) => setDraggingTool({ type, x, y })}
+          showCoordinates={showCoordinates}
+          onToggleCoordinates={() => setShowCoordinates(prev => !prev)}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          canUndo={undoStack.length > 0}
+          canRedo={redoStack.length > 0}
         />
 
         {/* Ghost drag element */}
@@ -521,6 +769,16 @@ export default function App() {
       <GuideModal
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
+      />
+
+      {/* نافذة إدارة الحساب والنسخ السحابي */}
+      <AccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        user={userProfile}
+        onUpdateUser={(u) => setUserProfile(u)}
+        onRefreshProjects={refreshProjectsList}
+        projectsCount={projectsList.length}
       />
     </div>
   );

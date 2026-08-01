@@ -1,0 +1,28 @@
+{
+  "entities": {
+    "users": {
+      "title": "users",
+      "description": "User profiles",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "projects": {
+      "title": "projects",
+      "description": "User story projects",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["userId", "title"]
+    }
+  }
+}

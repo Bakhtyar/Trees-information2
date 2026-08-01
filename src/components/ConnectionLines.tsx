@@ -14,7 +14,7 @@ interface ConnectionLinesProps {
   zoom: number;
 }
 
-export const ConnectionLines: React.FC<ConnectionLinesProps> = ({
+const ConnectionLinesComponent: React.FC<ConnectionLinesProps> = ({
   nodes,
   connections,
   selectedConnectionId,
@@ -412,3 +412,5 @@ export const ConnectionLines: React.FC<ConnectionLinesProps> = ({
     </>
   );
 };
+
+export const ConnectionLines = React.memo(ConnectionLinesComponent);

@@ -21,6 +21,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { StoryNode, NODE_CATEGORIES, FontStyleOption, FontSizeOption, NODE_PALETTE_COLORS } from '../types/story';
+import { getSpatialZoneForPos } from '../utils/storage';
 
 interface NodeCardProps {
   node: StoryNode;
@@ -37,14 +38,16 @@ interface NodeCardProps {
   onDragStart: (e: React.PointerEvent | React.MouseEvent | React.TouchEvent, node: StoryNode) => void;
   onUpdateNode?: (updatedNode: StoryNode) => void;
   isConnectingSource: boolean;
+  showCoordinates?: boolean;
 }
 
-export const NodeCard: React.FC<NodeCardProps> = ({
+const NodeCardComponent: React.FC<NodeCardProps> = ({
   node,
   isSelected,
   sequenceNumber = 1,
   isChildNode = false,
   isHoveredTarget = false,
+  showCoordinates = true,
   onSelect,
   onExpand,
   onEdit,
@@ -185,6 +188,13 @@ export const NodeCard: React.FC<NodeCardProps> = ({
     window.addEventListener('pointerup', onPointerUp);
   };
 
+  // Compute precise spatial zone & center coordinates
+  const cardW = node.width || 310;
+  const cardH = node.height || 160;
+  const cX = Math.round(node.x + cardW / 2);
+  const cY = Math.round(node.y + cardH / 2);
+  const spatialZone = getSpatialZoneForPos(cX, cY, 350);
+
   return (
     <div
       data-node-id={node.id}
@@ -228,7 +238,7 @@ export const NodeCard: React.FC<NodeCardProps> = ({
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      {/* 0. Top Sequential Number Badge (الترتيب والتسلسل الهرمي) */}
+      {/* 0. Top Sequential Number Badge & Spatial Coordinate Badge */}
       <div 
         className={`absolute -top-3 left-1/2 -translate-x-1/2 z-30 px-2.5 py-0.5 rounded-full text-xs font-black shadow-lg flex items-center gap-1 border transition-all pointer-events-none select-none ${
           isChildNode 
@@ -248,6 +258,17 @@ export const NodeCard: React.FC<NodeCardProps> = ({
           </>
         )}
       </div>
+
+      {/* Spatial Zone Badge (رمز المنطقة الدقيقة والإحداثيات العميقة) */}
+      {showCoordinates && (
+        <div 
+          className="absolute -top-3 right-3 z-30 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-900/95 text-cyan-300 border border-slate-700/80 shadow-md backdrop-blur-xs select-none pointer-events-none flex items-center gap-1.5"
+          title={`المجال المكاني الدقيق العميق: ${spatialZone.deepZone} (الفرع الدقيق: ${spatialZone.subIndex}/49) | أعلى اليسار: (X: ${Math.round(node.x)}, Y: ${Math.round(node.y)}) | المركز: (cX: ${cX}, cY: ${cY})`}
+        >
+          <span>📍 {spatialZone.deepZone || spatialZone.childZone}</span>
+          <span className="text-slate-400 font-normal border-r border-slate-700 pr-1.5 mr-0.5">({Math.round(node.x)}, {Math.round(node.y)})</span>
+        </div>
+      )}
       {/* 1. Floating Toolbar when selected (شريط أدوات عائم للعنصر) */}
       {isSelected && (
         <div 
@@ -770,3 +791,23 @@ export const NodeCard: React.FC<NodeCardProps> = ({
     </div>
   );
 };
+
+export const NodeCard = React.memo(NodeCardComponent, (prevProps, nextProps) => {
+  return (
+    prevProps.showCoordinates === nextProps.showCoordinates &&
+    prevProps.node.id === nextProps.node.id &&
+    prevProps.node.x === nextProps.node.x &&
+    prevProps.node.y === nextProps.node.y &&
+    prevProps.node.width === nextProps.node.width &&
+    prevProps.node.height === nextProps.node.height &&
+    prevProps.node.title === nextProps.node.title &&
+    prevProps.node.content === nextProps.node.content &&
+    prevProps.node.color === nextProps.node.color &&
+    prevProps.node.type === nextProps.node.type &&
+    prevProps.isSelected === nextProps.isSelected &&
+    prevProps.isChildNode === nextProps.isChildNode &&
+    prevProps.sequenceNumber === nextProps.sequenceNumber &&
+    prevProps.isHoveredTarget === nextProps.isHoveredTarget &&
+    prevProps.isConnectingSource === nextProps.isConnectingSource
+  );
+});

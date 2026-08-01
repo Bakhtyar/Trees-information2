@@ -1,9 +1,10 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, ZoomIn, ZoomOut, RotateCcw, Maximize } from 'lucide-react';
 import { StoryNode, StoryConnection, NodeCategory } from '../types/story';
 import { NodeCard } from './NodeCard';
 import { ConnectionLines } from './ConnectionLines';
 import { CanvasMode } from './Toolbar';
+import { getSpatialZoneForPos } from '../utils/storage';
 
 interface CanvasProps {
   nodes: StoryNode[];
@@ -25,7 +26,155 @@ interface CanvasProps {
   onStartConnectionBetween: (fromNodeId: string, toNodeId: string) => void;
   onAddNodeAtPosition?: (type: NodeCategory, x: number, y: number, connectFromNodeId?: string) => void;
   isDark: boolean;
+  showCoordinates?: boolean;
 }
+
+// Quantized, memoized Spatial Grid Overlay to eliminate lag during dragging/panning
+const SpatialGridOverlay = React.memo<{
+  canvasView: { x: number; y: number; zoom: number };
+  isDark: boolean;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  nodes: StoryNode[];
+  showCoordinates?: boolean;
+}>(({ canvasView, isDark, containerRef, nodes, showCoordinates = true }) => {
+  if (!showCoordinates) return null;
+
+  const width = containerRef.current?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+  const height = containerRef.current?.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
+
+  const SECTOR_SIZE = 350;
+
+  const minWorldX = (-canvasView.x) / canvasView.zoom;
+  const maxWorldX = (width - canvasView.x) / canvasView.zoom;
+  const minWorldY = (-canvasView.y) / canvasView.zoom;
+  const maxWorldY = (height - canvasView.y) / canvasView.zoom;
+
+  const minSecX = Math.floor(minWorldX / SECTOR_SIZE) - 1;
+  const maxSecX = Math.floor(maxWorldX / SECTOR_SIZE) + 1;
+  const minSecY = Math.floor(minWorldY / SECTOR_SIZE) - 1;
+  const maxSecY = Math.floor(maxWorldY / SECTOR_SIZE) + 1;
+
+  const nodeCountByZone = useMemo(() => {
+    const map = new Map<string, number>();
+    nodes.forEach(n => {
+      const nodeW = (n as any).width || 310;
+      const nodeH = (n as any).height || 160;
+      const cX = Math.round(n.x + nodeW / 2);
+      const cY = Math.round(n.y + nodeH / 2);
+      const { childZone } = getSpatialZoneForPos(cX, cY, SECTOR_SIZE);
+      map.set(childZone, (map.get(childZone) || 0) + 1);
+    });
+    return map;
+  }, [nodes]);
+
+  const safeMaxSecX = Math.min(maxSecX, minSecX + 16);
+  const safeMaxSecY = Math.min(maxSecY, minSecY + 12);
+
+  const sectors = [];
+  for (let xSec = minSecX; xSec <= safeMaxSecX; xSec++) {
+    for (let ySec = minSecY; ySec <= safeMaxSecY; ySec++) {
+      const leftPx = xSec * SECTOR_SIZE;
+      const topPx = ySec * SECTOR_SIZE;
+      const { parentZone, childZone } = getSpatialZoneForPos(leftPx + 10, topPx + 10, SECTOR_SIZE);
+      const isOrigin = xSec === 0 && ySec === 0;
+      const count = nodeCountByZone.get(childZone) || 0;
+
+      sectors.push({
+        xSec,
+        ySec,
+        leftPx,
+        topPx,
+        childZone,
+        parentZone,
+        isOrigin,
+        nodeCount: count
+      });
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 pointer-events-none z-0">
+      {sectors.map((sec) => (
+        <div
+          key={`${sec.xSec}_${sec.ySec}`}
+          className={`absolute border border-dashed transition-colors duration-200 p-2.5 flex flex-col justify-between ${
+            sec.isOrigin
+              ? isDark
+                ? 'border-cyan-500/40 bg-cyan-950/10'
+                : 'border-cyan-500/50 bg-cyan-50/20'
+              : isDark
+              ? 'border-slate-800/40'
+              : 'border-slate-300/50'
+          }`}
+          style={{
+            left: `${sec.leftPx}px`,
+            top: `${sec.topPx}px`,
+            width: '350px',
+            height: '350px',
+            backgroundImage: isDark 
+              ? 'radial-gradient(circle, rgba(56, 189, 248, 0.15) 1px, transparent 1px)' 
+              : 'radial-gradient(circle, rgba(14, 165, 233, 0.2) 1px, transparent 1px)',
+            backgroundSize: '50px 50px'
+          }}
+        >
+          <div className="flex items-center justify-between">
+            <div
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md font-mono text-[11px] font-black tracking-widest border backdrop-blur-xs select-none shadow-xs ${
+                sec.isOrigin
+                  ? 'bg-cyan-950/80 text-cyan-300 border-cyan-500/80 ring-2 ring-cyan-500/20'
+                  : sec.childZone.startsWith('-')
+                  ? 'bg-purple-950/40 text-purple-300/80 border-purple-800/30'
+                  : isDark
+                  ? 'bg-slate-900/60 text-slate-400/80 border-slate-700/30'
+                  : 'bg-white/80 text-slate-500 border-slate-200'
+              }`}
+              title={`المجال المكاني الهرمي: ${sec.childZone} (شبكة فرعية دقيقة بوضوح 50px وسرعة فائقة بدون لاق)`}
+            >
+              {sec.isOrigin ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping inline-block" />
+                  <span>⊕ ORIGIN (0,0) · {sec.childZone}</span>
+                </>
+              ) : (
+                <span>ZONE {sec.childZone}</span>
+              )}
+            </div>
+
+            {sec.nodeCount > 0 && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                {sec.nodeCount} {sec.nodeCount === 1 ? 'عقدة' : 'عقد'}
+              </span>
+            )}
+          </div>
+
+          {sec.xSec === 0 && (
+            <div className="text-[9px] font-mono font-bold text-slate-600/50 self-center">
+              VERTICAL Y-AXIS (0, Y)
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}, (prevProps, nextProps) => {
+  const stepXPrev = Math.floor(prevProps.canvasView.x / 180);
+  const stepXNext = Math.floor(nextProps.canvasView.x / 180);
+  const stepYPrev = Math.floor(prevProps.canvasView.y / 180);
+  const stepYNext = Math.floor(nextProps.canvasView.y / 180);
+  const zoomPrev = Math.round(prevProps.canvasView.zoom * 4);
+  const zoomNext = Math.round(nextProps.canvasView.zoom * 4);
+  const nodesCountPrev = prevProps.nodes.length;
+  const nodesCountNext = nextProps.nodes.length;
+
+  return (
+    prevProps.showCoordinates === nextProps.showCoordinates &&
+    stepXPrev === stepXNext &&
+    stepYPrev === stepYNext &&
+    zoomPrev === zoomNext &&
+    nodesCountPrev === nodesCountNext &&
+    prevProps.isDark === nextProps.isDark
+  );
+});
 
 export const Canvas: React.FC<CanvasProps> = ({
   nodes,
@@ -46,7 +195,8 @@ export const Canvas: React.FC<CanvasProps> = ({
   canvasMode,
   onStartConnectionBetween,
   onAddNodeAtPosition,
-  isDark
+  isDark,
+  showCoordinates = true
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -81,13 +231,16 @@ export const Canvas: React.FC<CanvasProps> = ({
     };
   }, [canvasView]);
 
+  const MIN_ZOOM = 0.02; // تصغير مفتوح للغاية (2%) لتشاهد كامل الخريطة مهما كانت كبيرة
+  const MAX_ZOOM = 2.5;  // تكبير طبيعي ومريح (250%)
+
   // Handle zooming with mouse wheel
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     if (!containerRef.current) return;
 
-    const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-    const nextZoom = Math.min(Math.max(canvasView.zoom * zoomFactor, 0.25), 2.5);
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+    const nextZoom = Math.min(Math.max(canvasView.zoom * zoomFactor, MIN_ZOOM), MAX_ZOOM);
 
     const rect = containerRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -103,6 +256,47 @@ export const Canvas: React.FC<CanvasProps> = ({
       x: newX,
       y: newY,
       zoom: nextZoom
+    });
+  };
+
+  // Helper for floating zoom buttons (+ / - / Reset)
+  const handleZoomStep = (factor: number) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+
+    const nextZoom = Math.min(Math.max(canvasView.zoom * factor, MIN_ZOOM), MAX_ZOOM);
+    const worldX = (centerX - canvasView.x) / canvasView.zoom;
+    const worldY = (centerY - canvasView.y) / canvasView.zoom;
+
+    const newX = centerX - worldX * nextZoom;
+    const newY = centerY - worldY * nextZoom;
+
+    onUpdateCanvasView({
+      x: newX,
+      y: newY,
+      zoom: nextZoom
+    });
+  };
+
+  const handleSetTargetZoom = (targetZoom: number) => {
+    if (!containerRef.current) return;
+    const clampedZoom = Math.min(Math.max(targetZoom, MIN_ZOOM), MAX_ZOOM);
+    const rect = containerRef.current.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+
+    const worldX = (centerX - canvasView.x) / canvasView.zoom;
+    const worldY = (centerY - canvasView.y) / canvasView.zoom;
+
+    const newX = centerX - worldX * clampedZoom;
+    const newY = centerY - worldY * clampedZoom;
+
+    onUpdateCanvasView({
+      x: newX,
+      y: newY,
+      zoom: clampedZoom
     });
   };
 
@@ -314,7 +508,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       const midY = (touch1.clientY + touch2.clientY) / 2;
 
       const scale = dist / (touchZoomRef.current.initialDist || 1);
-      const nextZoom = Math.min(Math.max(touchZoomRef.current.initialZoom * scale, 0.25), 2.5);
+      const nextZoom = Math.min(Math.max(touchZoomRef.current.initialZoom * scale, MIN_ZOOM), MAX_ZOOM);
 
       const deltaX = midX - touchZoomRef.current.initialMidX;
       const deltaY = midY - touchZoomRef.current.initialMidY;
@@ -449,6 +643,15 @@ export const Canvas: React.FC<CanvasProps> = ({
           transform: `translate(${canvasView.x}px, ${canvasView.y}px) scale(${canvasView.zoom})`
         }}
       >
+        {/* Spatial Grid Overlay (Memoized & Quantized for 60 FPS) */}
+        <SpatialGridOverlay
+          canvasView={canvasView}
+          isDark={isDark}
+          containerRef={containerRef}
+          nodes={nodes}
+          showCoordinates={showCoordinates}
+        />
+
         {/* SVG Connection Lines */}
         <ConnectionLines
           nodes={nodes}
@@ -549,6 +752,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 sequenceNumber={seqInfo.sequenceNumber}
                 isChildNode={seqInfo.isChildNode}
                 isHoveredTarget={isHoveredTarget}
+                showCoordinates={showCoordinates}
                 onSelect={(e) => {
                   e.stopPropagation();
                   if (canvasMode === 'connect') {
@@ -603,6 +807,52 @@ export const Canvas: React.FC<CanvasProps> = ({
           </button>
         </div>
       )}
+
+      {/* Floating Zoom Controls Panel (أزرار التحكم بالزوم والتصغير الفائق) */}
+      <div className="absolute bottom-6 left-6 z-30 flex items-center gap-1 bg-slate-900/90 border border-slate-700/80 p-1.5 rounded-2xl shadow-2xl backdrop-blur-md select-none">
+        <button
+          onClick={() => handleZoomStep(1.2)}
+          className="p-2 hover:bg-slate-800 text-slate-200 hover:text-cyan-400 rounded-xl transition"
+          title="تكبير اللوحة والعناصر (+)"
+        >
+          <ZoomIn className="w-4 h-4" />
+        </button>
+
+        <button
+          onClick={() => handleSetTargetZoom(1.0)}
+          className="px-2.5 py-1 text-xs font-mono font-bold text-cyan-300 hover:bg-slate-800 rounded-xl transition border border-slate-700/60"
+          title="إعادة ضبط الزوم إلى 100%"
+        >
+          {Math.round(canvasView.zoom * 100)}%
+        </button>
+
+        <button
+          onClick={() => handleZoomStep(0.8)}
+          className="p-2 hover:bg-slate-800 text-slate-200 hover:text-cyan-400 rounded-xl transition"
+          title="تصغير اللوحة (-)"
+        >
+          <ZoomOut className="w-4 h-4" />
+        </button>
+
+        <div className="w-px h-5 bg-slate-700 mx-0.5" />
+
+        <button
+          onClick={() => handleSetTargetZoom(0.15)}
+          className="px-2 py-1 text-[11px] font-bold bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 border border-purple-500/40 rounded-xl transition flex items-center gap-1"
+          title="تصغير خارجي شامل للمشروع كاملاً (15%)"
+        >
+          <Maximize className="w-3 h-3" />
+          <span>نظرة شاملة</span>
+        </button>
+
+        <button
+          onClick={() => handleSetTargetZoom(1.0)}
+          className="p-2 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-xl transition"
+          title="إعادة ضبط الوضع الافتراضي (100%)"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+      </div>
     </div>
   );
 };
