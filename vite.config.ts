@@ -6,6 +6,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/Trees-information2/', // 👈 تم إضافة هذا السطر هنا لحل مشكلة الصفحة البيضاء
     plugins: [
       react(), 
       tailwindcss(),
