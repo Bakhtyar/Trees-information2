@@ -25,7 +25,8 @@ import {
   downloadAIPromptFile,
   openHTMLPreviewInNewTab,
   generateHTMLReport,
-  generateAIPrompt 
+  generateAIPrompt,
+  generateASCIITreeMap 
 } from '../utils/storage';
 
 interface ExportImportModalProps {
@@ -46,6 +47,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<'download' | 'preview'>('download');
   const [copiedAI, setCopiedAI] = useState(false);
+  const [copiedTree, setCopiedTree] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const previewSrcDoc = useMemo(() => {
@@ -70,6 +72,13 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
     navigator.clipboard.writeText(promptText);
     setCopiedAI(true);
     setTimeout(() => setCopiedAI(false), 3000);
+  };
+
+  const handleCopyASCIITree = () => {
+    const treeText = generateASCIITreeMap(project);
+    navigator.clipboard.writeText(treeText);
+    setCopiedTree(true);
+    setTimeout(() => setCopiedTree(false), 3000);
   };
 
   return (
@@ -142,7 +151,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
           )}
 
           {activeTab === 'download' ? (
-            <div className="space-y-6">
+            <div key="download-tab-content" className="space-y-6">
               {/* 🎯 ZAR (BUTTON) HERO PRIMARY: تنزيل ملف التوصيف الشامل للذكاء الاصطناعي */}
               <div className="bg-gradient-to-br from-purple-950/90 via-slate-900 to-amber-950/60 border-2 border-purple-500/60 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden text-center sm:text-right">
                 <div className="absolute -right-16 -top-16 w-48 h-48 bg-purple-500/15 rounded-full blur-3xl pointer-events-none"></div>
@@ -172,7 +181,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                       <span>🚀 تنزيل ملف التوصيف الشامل (.txt)</span>
                     </button>
 
-                    {/* زر النسخ السريع */}
+                    {/* زر النسخ السريع للذكاء الاصطناعي */}
                     <button
                       onClick={handleCopyAIPrompt}
                       className={`flex items-center justify-center gap-2 px-6 py-4 rounded-2xl text-sm font-bold transition border w-full sm:w-auto ${
@@ -182,7 +191,20 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                       }`}
                     >
                       {copiedAI ? <Check className="w-5 h-5 stroke-[2.5]" /> : <Copy className="w-5 h-5" />}
-                      <span>{copiedAI ? 'تم نسخ التقرير الحافظة بنجاح ✓' : 'نسخ النص مباشرة دون تنزيل'}</span>
+                      <span>{copiedAI ? 'تم نسخ التقرير الحافظة بنجاح ✓' : 'نسخ تقرير الذكاء الاصطناعي'}</span>
+                    </button>
+
+                    {/* زر نسخ الخريطة الشجرية الهرمية البصرية */}
+                    <button
+                      onClick={handleCopyASCIITree}
+                      className={`flex items-center justify-center gap-2 px-6 py-4 rounded-2xl text-sm font-bold transition border w-full sm:w-auto ${
+                        copiedTree
+                          ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-lg shadow-cyan-500/20'
+                          : 'bg-slate-800/90 hover:bg-slate-800 text-cyan-300 border-cyan-500/40'
+                      }`}
+                    >
+                      {copiedTree ? <Check className="w-5 h-5 stroke-[2.5]" /> : <Copy className="w-5 h-5" />}
+                      <span>{copiedTree ? 'تم نسخ الخريطة الشجرية! ✓' : '🌳 نسخ الخريطة الشجرية (Tree Map)'}</span>
                     </button>
                   </div>
                 </div>
@@ -269,7 +291,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
             </div>
           ) : (
             /* معاينة تفاعلية حية داخل إطار iframe */
-            <div className="h-[60vh] w-full relative rounded-2xl overflow-hidden border border-slate-800 bg-slate-950 flex flex-col">
+            <div key="preview-tab-content" className="h-[60vh] w-full relative rounded-2xl overflow-hidden border border-slate-800 bg-slate-950 flex flex-col">
               <div className="bg-slate-900 border-b border-slate-800 px-4 py-2 flex items-center justify-between gap-2 shrink-0">
                 <span className="text-xs text-slate-300 font-semibold flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>

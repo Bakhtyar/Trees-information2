@@ -799,6 +799,8 @@ export const Canvas: React.FC<CanvasProps> = ({
                 isChildNode={seqInfo.isChildNode}
                 isHoveredTarget={isHoveredTarget}
                 showCoordinates={showCoordinates}
+                allNodes={nodes}
+                connections={connections}
                 onSelect={(e) => {
                   e.stopPropagation();
                   if (canvasMode === 'connect') {

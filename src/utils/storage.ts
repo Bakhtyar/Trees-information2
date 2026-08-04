@@ -1,5 +1,11 @@
 import { StoryProject, UserProfile, NODE_CATEGORIES, StoryNode, StoryConnection, NodeCategory } from '../types/story';
 import { SAMPLE_DETECTIVE_PROJECT, BLANK_PROJECT_TEMPLATE } from './sampleProject';
+import { 
+  saveProjectToFirestore, 
+  saveAllProjectsToFirestore, 
+  getUserProjectsFromFirestore, 
+  deleteProjectFromFirestore 
+} from '../lib/firebase';
 
 const LEGACY_STORAGE_KEY = 'STORY_NOVEL_MAPPER_PROJECT_V1';
 const PROJECTS_LIST_KEY = 'STORY_NOVEL_MAPPER_PROJECTS_V2';
@@ -80,6 +86,12 @@ export function saveAllProjects(projects: StoryProject[]): boolean {
     localStorage.setItem(PROJECTS_LIST_KEY, serialized);
     // Also sync to account backup vault
     syncCloudVault(undefined, projects);
+
+    // Auto sync to Firestore if user is authenticated
+    const user = getUserProfile();
+    if (user && user.googleConnected && user.id && user.id !== 'guest_user_1' && user.id !== 'guest') {
+      saveAllProjectsToFirestore(user.id, projects, user.email);
+    }
     return true;
   } catch (err) {
     console.error('Error saving all projects:', err);
@@ -132,7 +144,15 @@ export function saveProject(project: StoryProject): boolean {
     }
 
     setActiveProjectId(updatedProject.id);
-    return saveAllProjects(projects);
+    const savedLocally = saveAllProjects(projects);
+
+    // Auto sync single project to Firestore if user is logged in
+    const user = getUserProfile();
+    if (user && user.googleConnected && user.id && user.id !== 'guest_user_1' && user.id !== 'guest') {
+      saveProjectToFirestore(user.id, updatedProject, user.email);
+    }
+
+    return savedLocally;
   } catch (err) {
     console.error('Error auto-saving project:', err);
     return false;
@@ -280,6 +300,11 @@ export function deleteProject(projectId: string): StoryProject[] {
   let projects = loadAllProjects();
   projects = projects.filter(p => p.id !== projectId);
   
+  const user = getUserProfile();
+  if (user && user.googleConnected && user.id && user.id !== 'guest_user_1' && user.id !== 'guest') {
+    deleteProjectFromFirestore(projectId);
+  }
+
   if (projects.length === 0) {
     const fresh = createNewProject('مشروع جديد', 'بداية قصة جديدة', 'عام', 'blank');
     return [fresh];
@@ -290,6 +315,81 @@ export function deleteProject(projectId: string): StoryProject[] {
     setActiveProjectId(projects[0].id);
   }
   return projects;
+}
+
+// ---------------- CLOUD FIRESTORE SYNC & SESSION MANAGEMENT ----------------
+
+export async function syncUserProjectsFromCloud(userId: string, userEmail?: string): Promise<StoryProject[]> {
+  if (!userId || userId === 'guest' || userId === 'guest_user_1') {
+    return loadAllProjects();
+  }
+
+  try {
+    const remoteProjects = await getUserProjectsFromFirestore(userId, userEmail);
+    const localProjects = loadAllProjects();
+
+    const remoteMap = new Map<string, StoryProject>();
+    if (remoteProjects && remoteProjects.length > 0) {
+      remoteProjects.forEach((p: any) => {
+        if (p && p.id) remoteMap.set(p.id, p as StoryProject);
+      });
+    }
+
+    // Merge local unsynced projects or newer local edits into remote map
+    if (localProjects && localProjects.length > 0) {
+      localProjects.forEach((lp) => {
+        if (!remoteMap.has(lp.id)) {
+          remoteMap.set(lp.id, lp);
+          saveProjectToFirestore(userId, lp, userEmail);
+        } else {
+          const rp = remoteMap.get(lp.id)!;
+          if ((lp.lastSavedAt || 0) > (rp.lastSavedAt || 0)) {
+            remoteMap.set(lp.id, lp);
+            saveProjectToFirestore(userId, lp, userEmail);
+          }
+        }
+      });
+    }
+
+    let finalProjects = Array.from(remoteMap.values());
+
+    if (finalProjects.length === 0) {
+      const defaultProj = [SAMPLE_DETECTIVE_PROJECT];
+      finalProjects = defaultProj;
+      await saveAllProjectsToFirestore(userId, defaultProj, userEmail);
+    }
+
+    // Save synchronized projects list to LocalStorage
+    const serialized = JSON.stringify(finalProjects);
+    localStorage.setItem(PROJECTS_LIST_KEY, serialized);
+    syncCloudVault(undefined, finalProjects);
+
+    const activeId = getActiveProjectId();
+    if (!finalProjects.some(p => p.id === activeId)) {
+      if (finalProjects.length > 0) {
+        setActiveProjectId(finalProjects[0].id);
+      }
+    }
+
+    return finalProjects;
+  } catch (err) {
+    console.error('Error in syncUserProjectsFromCloud:', err);
+    return loadAllProjects();
+  }
+}
+
+export function clearUserSessionAndResetToGuest(): StoryProject[] {
+  try {
+    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(DEFAULT_GUEST_USER));
+    const defaultList = [SAMPLE_DETECTIVE_PROJECT];
+    localStorage.setItem(PROJECTS_LIST_KEY, JSON.stringify(defaultList));
+    setActiveProjectId(defaultList[0].id);
+    syncCloudVault(DEFAULT_GUEST_USER, defaultList);
+    return defaultList;
+  } catch (e) {
+    console.error('Error resetting user session:', e);
+    return [SAMPLE_DETECTIVE_PROJECT];
+  }
 }
 
 // ---------------- CLOUD VAULT BACKUP & SYNC ----------------
@@ -454,6 +554,472 @@ export function importFromJSONFile(file: File): Promise<StoryProject> {
   });
 }
 
+/**
+ * Helper function to determine the effective display title for a node.
+ * If the node title is empty or a default placeholder (e.g. "فرعي جديد"),
+ * and the node content contains custom text, the content (or its first line/snippet)
+ * is used as the node's title instead.
+ */
+export function getNodeDisplayTitle(node: { title?: string; content?: string; type?: string } | null | undefined): string {
+  if (!node) return 'بدون عنوان';
+
+  const rawTitle = (node.title || '').trim();
+  const rawContent = (node.content || '').trim();
+
+  const defaultTitles = [
+    'فرعي جديد',
+    'عنوان رئيسي',
+    'مذكرة',
+    'مذكرة جديدة',
+    'ملاحظة',
+    'ملاحظة جديدة',
+    'صورة جديدة',
+    'بدون عنوان',
+    'عنصر بدون عنوان',
+    'عنصر جديد',
+    'مربع عادي',
+    'مربع جديد',
+    'حدث جديد',
+    'ذروة جديدة',
+    'نهاية جديدة',
+    'صورة بدون عنوان',
+    'مجموعة بدون عنوان',
+    'ملاحظة خفية'
+  ];
+
+  const isDefaultTitle = !rawTitle || defaultTitles.includes(rawTitle);
+
+  const defaultContents = [
+    'اكتب هنا تفاصيل المربع...',
+    'اكتب هنا تفاصيل هذا المربع أو حدث القصة...',
+    'اضغط لقراءة أو كتابة المقال الكامل...',
+    'اكتب التفاصيل هنا...',
+    'انقر لتعديل النص...',
+    'اكتب محتوى المذكرة هنا...',
+    'اكتب هنا كل التفاصيل، الحوار المقترح، الخلفية الدرامية للشخصية، أو الدليل السري...',
+    '(لا يوجد نص تفصيلي داخل هذه العقدة)',
+    '(لا يوجد نص دقيق داخل هذه العقدة)'
+  ];
+
+  const isDefaultContent =
+    !rawContent ||
+    defaultContents.includes(rawContent) ||
+    rawContent.startsWith('اكتب هنا تفاصيل') ||
+    rawContent.startsWith('اكتب التفاصيل هنا');
+
+  if (isDefaultTitle && !isDefaultContent) {
+    const lines = rawContent.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    const firstLine = lines.length > 0 ? lines[0] : rawContent;
+    if (firstLine.length <= 65) {
+      return firstLine;
+    }
+    return firstLine.substring(0, 62) + '...';
+  }
+
+  return rawTitle || 'بدون عنوان';
+}
+
+/**
+ * Computes a human-readable relative spatial direction description between two main nodes.
+ */
+export function getRelativeSpatialDescription(curr: StoryNode, prev?: StoryNode | null): string {
+  if (!prev) {
+    return `بداية المخطط (النقطة المرجعية الأولى للمشروع - الإحداثيات: X: ${Math.round(curr.x)}, Y: ${Math.round(curr.y)})`;
+  }
+
+  const dx = curr.x - prev.x;
+  const dy = curr.y - prev.y;
+
+  let vDir = '';
+  if (dy < -60) vDir = 'أعلى';
+  else if (dy > 60) vDir = 'أسفل';
+
+  let hDir = '';
+  if (dx > 60) hDir = 'اليمين';
+  else if (dx < -60) hDir = 'اليسار';
+
+  let combined = '';
+  if (vDir && hDir) {
+    combined = `${vDir} ${hDir}`;
+  } else if (vDir) {
+    combined = `${vDir} مباشرة`;
+  } else if (hDir) {
+    combined = `إلى ${hDir} مباشرة`;
+  } else {
+    combined = 'في نفس المستور والمنطقة البصرية';
+  }
+
+  return `يقع ${combined} بالنسبة للعنصر الرئيسي السابق (الإحداثيات: X: ${Math.round(curr.x)}, Y: ${Math.round(curr.y)})`;
+}
+
+/**
+ * Summarizes categories of children nodes.
+ */
+export function getChildrenTypesSummary(children: StoryNode[]): string {
+  if (children.length === 0) return 'لا يوجد فروع متصلة';
+  const counts = new Map<string, number>();
+  children.forEach((c) => {
+    const catName = NODE_CATEGORIES[c.type]?.name || c.type;
+    counts.set(catName, (counts.get(catName) || 0) + 1);
+  });
+  const parts: string[] = [];
+  counts.forEach((count, catName) => {
+    parts.push(`${count} ${catName}`);
+  });
+  return parts.join('، ');
+}
+
+export interface CanvasNodeMeta {
+  isMain: boolean;
+  mainSeqNum: number;       // 1, 2, 3... for Main nodes
+  branchSeqNum: number;     // 1, 2, 3... local to parent Main node/branch
+  parentMainSeqNum: number; // The Main node index this node belongs to
+  parentMainId: string | null;
+  globalIndex: number;      // 1..N unique index for array sorting
+}
+
+/**
+ * Computes unified node indices and sequence numbers matching the Canvas rendering logic (bottom-to-top b.y - a.y).
+ * Enforces local branch sequence numbers that restart from #1 for every Main Element.
+ */
+export function getUnifiedCanvasNodeMap(project: StoryProject) {
+  const nodes = project.nodes || [];
+  const nodeMap = new Map<string, StoryNode>();
+  nodes.forEach((n) => nodeMap.set(n.id, n));
+
+  const rootNodes: StoryNode[] = [];
+  const childrenMap = new Map<string, StoryNode[]>();
+  nodes.forEach((n) => childrenMap.set(n.id, []));
+
+  nodes.forEach((n) => {
+    if (n.parentId && nodeMap.has(n.parentId)) {
+      childrenMap.get(n.parentId)?.push(n);
+    } else {
+      rootNodes.push(n);
+    }
+  });
+
+  // Sort root nodes bottom-to-top (highest Y coordinate first) to match Canvas visual order
+  rootNodes.sort((a, b) => b.y - a.y || a.x - b.x);
+
+  // Sort children bottom-to-top or left-to-right
+  childrenMap.forEach((children) => {
+    children.sort((a, b) => b.y - a.y || a.x - b.x);
+  });
+
+  const nodeIndexMap = new Map<string, number>();
+  const seqMap = new Map<string, { sequenceNumber: number; isChildNode: boolean }>();
+  const nodeMetaMap = new Map<string, CanvasNodeMeta>();
+
+  let globalIndex = 1;
+
+  // Traversal in canvas bottom-to-top order
+  rootNodes.forEach((root, rIdx) => {
+    const mainSeqNum = rIdx + 1;
+    const gIdx = globalIndex++;
+    nodeIndexMap.set(root.id, gIdx);
+    seqMap.set(root.id, { sequenceNumber: mainSeqNum, isChildNode: false });
+
+    nodeMetaMap.set(root.id, {
+      isMain: true,
+      mainSeqNum,
+      branchSeqNum: mainSeqNum,
+      parentMainSeqNum: mainSeqNum,
+      parentMainId: root.id,
+      globalIndex: gIdx
+    });
+
+    // Helper to recursively process children & assign LOCAL branch indices per parent
+    function processChildren(parentNode: StoryNode, parentMainSeq: number, parentMainNodeId: string) {
+      const children = childrenMap.get(parentNode.id) || [];
+      children.forEach((child, cIdx) => {
+        const branchSeqNum = cIdx + 1; // RE-STARTS AT 1 FOR EACH PARENT'S BRANCHES!
+        const childGIdx = globalIndex++;
+        if (!nodeIndexMap.has(child.id)) {
+          nodeIndexMap.set(child.id, childGIdx);
+        }
+        seqMap.set(child.id, { sequenceNumber: branchSeqNum, isChildNode: true });
+
+        nodeMetaMap.set(child.id, {
+          isMain: false,
+          mainSeqNum: parentMainSeq,
+          branchSeqNum,
+          parentMainSeqNum: parentMainSeq,
+          parentMainId: parentMainNodeId,
+          globalIndex: nodeIndexMap.get(child.id)!
+        });
+
+        processChildren(child, parentMainSeq, parentMainNodeId);
+      });
+    }
+
+    processChildren(root, mainSeqNum, root.id);
+  });
+
+  // Assign any remaining unvisited nodes
+  nodes.forEach((n) => {
+    if (!nodeIndexMap.has(n.id)) {
+      const gIdx = globalIndex++;
+      nodeIndexMap.set(n.id, gIdx);
+      seqMap.set(n.id, { sequenceNumber: 1, isChildNode: false });
+      nodeMetaMap.set(n.id, {
+        isMain: true,
+        mainSeqNum: rootNodes.length + 1,
+        branchSeqNum: 1,
+        parentMainSeqNum: rootNodes.length + 1,
+        parentMainId: n.id,
+        globalIndex: gIdx
+      });
+    }
+  });
+
+  return { rootNodes, childrenMap, nodeIndexMap, seqMap, nodeMetaMap, nodeMap };
+}
+
+/**
+ * Helper to build clear, human-readable node references for export reports.
+ */
+export function getNodeRefLabel(
+  nodeId: string, 
+  nodeMap: Map<string, StoryNode>, 
+  nodeMetaMap: Map<string, CanvasNodeMeta>
+): string {
+  const target = nodeMap.get(nodeId);
+  if (!target) return '?';
+  const meta = nodeMetaMap.get(nodeId);
+  const title = getNodeDisplayTitle(target);
+  if (!meta) return `"${title}"`;
+
+  if (meta.isMain) {
+    return `#${meta.mainSeqNum} رئيسي ("${title}")`;
+  } else {
+    return `#${meta.branchSeqNum} فرعي لـ رئيسي #${meta.parentMainSeqNum} ("${title}")`;
+  }
+}
+
+/**
+ * Generates the full main-element-first hierarchical tree report.
+ * Strictly adheres to: Main Element #1 -> Its branch tree (#1, #2...) -> Main Element #2 -> Its branch tree (#1, #2... restarting at #1).
+ */
+export function generateMainElementTreeReport(project: StoryProject): string {
+  const nodes = project.nodes || [];
+  if (nodes.length === 0) return 'المخطط خالي من العناصر.';
+
+  const { rootNodes, childrenMap, nodeMetaMap, nodeMap } = getUnifiedCanvasNodeMap(project);
+
+  const visited = new Set<string>();
+  let report = '';
+  let prevMainNode: StoryNode | null = null;
+
+  function renderBranchDetails(node: StoryNode, depth: number, parentNode: StoryNode): string {
+    visited.add(node.id);
+    const meta = nodeMetaMap.get(node.id);
+    const branchSeqNum = meta?.branchSeqNum || 1;
+    const parentMainSeqNum = meta?.parentMainSeqNum || 1;
+    const displayTitle = getNodeDisplayTitle(node);
+    const catName = NODE_CATEGORIES[node.type]?.name || node.type;
+    const parentRefStr = getNodeRefLabel(parentNode.id, nodeMap, nodeMetaMap);
+
+    const indent = '  '.repeat(depth);
+    let bStr = '';
+    const levelTag = depth === 1 ? '🌿 فرع' : '🍃 فرع فرعي';
+    bStr += `${indent}↳ [${levelTag} #${branchSeqNum}] - "${displayTitle}"\n`;
+    bStr += `${indent}   - الرقم التسلسلي المحلي للفرع (داخل الرئيسي #${parentMainSeqNum}): #${branchSeqNum}\n`;
+    bStr += `${indent}   - نوع وتصنيف العنصر: ${catName}\n`;
+    bStr += `${indent}   - علاقة الربط بالسلف: تفرع مباشر من ${parentRefStr}\n`;
+    bStr += `${indent}   - المحتوى النصي المكتوب بداخله:\n`;
+    bStr += `${indent}     """\n${indent}     ${(node.content || '(لا يوجد نص تفصيلي داخل هذا الفرع)').replace(/\n/g, '\n' + indent + '     ')}\n${indent}     """\n`;
+    
+    // Direct connections
+    const outgoing = project.connections.filter((c) => c.fromNodeId === node.id);
+    const incoming = project.connections.filter((c) => c.toNodeId === node.id);
+    if (outgoing.length > 0 || incoming.length > 0) {
+      bStr += `${indent}   - الأسهم والروابط المباشرة للفرع:\n`;
+      outgoing.forEach((c) => {
+        const targetRef = getNodeRefLabel(c.toNodeId, nodeMap, nodeMetaMap);
+        bStr += `${indent}     ➔ سهم موجه نحو ${targetRef} [نوع العلاقة: ${c.label || 'مرتبط بـ'}]\n`;
+      });
+      incoming.forEach((c) => {
+        const sourceRef = getNodeRefLabel(c.fromNodeId, nodeMap, nodeMetaMap);
+        bStr += `${indent}     ⬅ سهم قادم من ${sourceRef} [نوع العلاقة: ${c.label || 'مرتبط بـ'}]\n`;
+      });
+    }
+
+    // Sub-branches
+    const children = (childrenMap.get(node.id) || []).filter((c) => !visited.has(c.id));
+    if (children.length > 0) {
+      bStr += `${indent}   - فروع الفروع المربوطة بهذا الفرع (${children.length}):\n`;
+      children.forEach((child) => {
+        bStr += renderBranchDetails(child, depth + 1, node);
+      });
+    }
+    bStr += `\n`;
+
+    return bStr;
+  }
+
+  rootNodes.forEach((mainNode) => {
+    visited.add(mainNode.id);
+    const mainMeta = nodeMetaMap.get(mainNode.id);
+    const mainSeqNum = mainMeta?.mainSeqNum || 1;
+    const displayTitle = getNodeDisplayTitle(mainNode);
+    const catName = NODE_CATEGORIES[mainNode.type]?.name || mainNode.type;
+
+    report += `================================================================================\n`;
+    report += `📌 [#${mainSeqNum} رئيسي] - "${displayTitle}"\n`;
+    report += `================================================================================\n`;
+    report += `• الرقم التسلسلي للعنصر الرئيسي: #${mainSeqNum} (عنصر رئيسي)\n`;
+    report += `• نوع وتصنيف العنصر: ${catName}\n`;
+    report += `• العنوان: "${displayTitle}"\n`;
+    report += `• المحتوى النصي التفصيلي المكتوب بداخله:\n`;
+    report += `  """\n  ${(mainNode.content || '(لا يوجد نص تفصيلي داخل هذا العنصر الرئيسي)').replace(/\n/g, '\n  ')}\n  """\n`;
+    if (mainNode.internalNotes && mainNode.internalNotes.trim()) {
+      report += `• ملاحظات الكاتب السرية:\n  """\n  ${mainNode.internalNotes.replace(/\n/g, '\n  ')}\n  """\n`;
+    }
+    report += `• الإحداثيات البصرية: X=${Math.round(mainNode.x)}, Y=${Math.round(mainNode.y)}\n`;
+    report += `• موقع العنصر الرئيسي النسبي الفضائي: ${getRelativeSpatialDescription(mainNode, prevMainNode)}\n`;
+
+    // Direct connections
+    const outgoing = project.connections.filter((c) => c.fromNodeId === mainNode.id);
+    const incoming = project.connections.filter((c) => c.toNodeId === mainNode.id);
+    if (outgoing.length > 0 || incoming.length > 0) {
+      report += `• الروابط والعلاقات والأسهم المباشرة لهذا العنصر الرئيسي:\n`;
+      outgoing.forEach((c) => {
+        const targetRef = getNodeRefLabel(c.toNodeId, nodeMap, nodeMetaMap);
+        const dir = c.bidirectional
+          ? `⬌ علاقة تبادلية مزدوجة مع ${targetRef}`
+          : `➔ سهم موجه نحو ${targetRef}`;
+        report += `  - [${c.label || 'مرتبط بـ'}] ${dir}\n`;
+      });
+      incoming.forEach((c) => {
+        const sourceRef = getNodeRefLabel(c.fromNodeId, nodeMap, nodeMetaMap);
+        const dir = c.bidirectional
+          ? `⬌ علاقة تبادلية مزدوجة مع ${sourceRef}`
+          : `⬅ سهم موجه من ${sourceRef} نحو هذا العنصر`;
+        report += `  - [${c.label || 'مرتبط بـ'}] ${dir}\n`;
+      });
+    }
+
+    const directChildren = (childrenMap.get(mainNode.id) || []).filter((c) => !visited.has(c.id));
+    report += `• عدد الفروع المباشرة: ${directChildren.length}\n`;
+    report += `• أنواع عناصر الفروع المتصلة بالعنصر الرئيسي #${mainSeqNum}: ${getChildrenTypesSummary(directChildren)}\n\n`;
+
+    if (directChildren.length > 0) {
+      report += `--- [ترتيب وتفاصيل الفروع المربوطة بالعنصر الرئيسي #${mainSeqNum}] ---\n\n`;
+      directChildren.forEach((child) => {
+        report += renderBranchDetails(child, 1, mainNode);
+      });
+    } else {
+      report += `(لا توجد فروع متصلة بهذا العنصر الرئيسي)\n\n`;
+    }
+
+    report += `✓ تم استكمال كافّة الفروع والفرعيات التابعة للعنصر الرئيسي #${mainSeqNum}.\n`;
+    report += `================================================================================\n\n`;
+
+    prevMainNode = mainNode;
+  });
+
+  // Handle any remaining unvisited nodes
+  const remainingNodes = nodes
+    .filter((n) => !visited.has(n.id))
+    .sort((a, b) => (nodeMetaMap.get(a.id)?.globalIndex || 0) - (nodeMetaMap.get(b.id)?.globalIndex || 0));
+
+  if (remainingNodes.length > 0) {
+    report += `================================================================================\n`;
+    report += `📌 [عناصر مستقلة / إضافية]\n`;
+    report += `================================================================================\n`;
+    remainingNodes.forEach((remNode) => {
+      visited.add(remNode.id);
+      const displayTitle = getNodeDisplayTitle(remNode);
+      const catName = NODE_CATEGORIES[remNode.type]?.name || remNode.type;
+      report += `- ["${displayTitle}"] (${catName}) - X:${Math.round(remNode.x)}, Y:${Math.round(remNode.y)}\n`;
+      report += `  """\n  ${remNode.content || ''}\n  """\n\n`;
+    });
+  }
+
+  return report;
+}
+
+/**
+ * Generates a visual ASCII / Box-Drawing tree diagram representation of the project hierarchy.
+ * Formatted cleanly with parent-child tree branches (├──, └──) and main transitions (│, ▼)
+ * using local branch sequence numbers (#1, #2...) that restart for every main element.
+ */
+export function generateASCIITreeMap(project: StoryProject): string {
+  const nodes = project.nodes || [];
+  if (nodes.length === 0) {
+    return '(المخطط خالي من العناصر)';
+  }
+
+  const { rootNodes, childrenMap, nodeMetaMap, nodeMap } = getUnifiedCanvasNodeMap(project);
+
+  const visited = new Set<string>();
+  const treeLines: string[] = [];
+
+  const projectTitle = project.title || 'مخطط القصة والرواية';
+  treeLines.push(`(${projectTitle}`);
+
+  function renderBranch(node: StoryNode, indentPrefix: string, isLastChild: boolean) {
+    visited.add(node.id);
+    const displayTitle = getNodeDisplayTitle(node);
+    const meta = nodeMetaMap.get(node.id);
+    const branchSymbol = isLastChild ? '└── ' : '├── ';
+    const tag = meta?.isMain ? `[📌 رئيسي #${meta.mainSeqNum}]` : `[🌿 فرع #${meta.branchSeqNum}]`;
+
+    treeLines.push(`${indentPrefix}${branchSymbol}${tag} "${displayTitle}"`);
+
+    const children = (childrenMap.get(node.id) || []).filter((c) => !visited.has(c.id));
+    const nextIndent = indentPrefix + (isLastChild ? '    ' : '│   ');
+
+    children.forEach((child, i) => {
+      renderBranch(child, nextIndent, i === children.length - 1);
+    });
+  }
+
+  rootNodes.forEach((root, rIdx) => {
+    if (visited.has(root.id)) return;
+
+    if (rIdx > 0 || treeLines.length > 1) {
+      treeLines.push('│');
+      treeLines.push('▼');
+    }
+
+    visited.add(root.id);
+    const displayTitle = getNodeDisplayTitle(root);
+    const rootMeta = nodeMetaMap.get(root.id);
+    const rootTag = `[📌 رئيسي #${rootMeta?.mainSeqNum || (rIdx + 1)}]`;
+
+    treeLines.push(`${rootTag} "${displayTitle}"`);
+
+    const children = (childrenMap.get(root.id) || []).filter((c) => !visited.has(c.id));
+    if (children.length > 0) {
+      treeLines.push('│');
+      children.forEach((child, i) => {
+        renderBranch(child, '', i === children.length - 1);
+      });
+    }
+  });
+
+  // Remaining unvisited nodes if any
+  const remainingNodes = nodes
+    .filter((n) => !visited.has(n.id))
+    .sort((a, b) => (nodeMetaMap.get(a.id)?.globalIndex || 0) - (nodeMetaMap.get(b.id)?.globalIndex || 0));
+
+  if (remainingNodes.length > 0) {
+    treeLines.push('│');
+    treeLines.push('▼');
+    remainingNodes.forEach((orphan, i) => {
+      visited.add(orphan.id);
+      const displayTitle = getNodeDisplayTitle(orphan);
+      const isLast = i === remainingNodes.length - 1;
+      treeLines.push(`${isLast ? '└── ' : '├── '}["${displayTitle}"]`);
+    });
+  }
+
+  treeLines.push(')');
+  return treeLines.join('\n');
+}
+
 export function exportToMarkdown(project: StoryProject): string {
   let md = `# 📚 ${project.title || 'مخطط القصة والرواية'}\n\n`;
   if (project.description) {
@@ -461,108 +1027,66 @@ export function exportToMarkdown(project: StoryProject): string {
   }
   md += `*تاريخ التصدير:* ${new Date().toLocaleString('ar-EG')}\n`;
   md += `*عدد المربعات والعقد:* ${project.nodes.length} | *عدد العلاقات والروابط:* ${project.connections.length}\n\n`;
-  md += `> 📌 **تنبيه تسلسل العناصر واتجاه الأسهم:** تتميز المستندات والأكواد المصدرة بالاحتفاظ بالأرقام التسلسلية الثابتة للعناصر (#1, #2, ...) كترتيب أصلي ثابت. ربط السهم بين أي عنصرين ينقل اتجاه التأثير الدرامي دون تغيير الأرقام أو إعادة ترتيب العناصر.\n\n`;
+  md += `> 📌 **تنبيه تسلسل العناصر واتجاه الأسهم:** يبدأ المخطط مع العنصر الرئيسي الأصغر رقماً (#1 رئيسي) بكافة فروعه التابعة (#1, #2, ...)، ثم يستكمل للعنصر الرئيسي التالي #2 رئيسي وفروعه التي تبدأ تسلسلتها المحلية من #1 مجدداً لكل عنصر رئيسي.\n\n`;
   md += `---\n\n`;
 
-  // Map original node indices
-  const nodeIndexMap = new Map<string, number>();
-  project.nodes.forEach((n, idx) => nodeIndexMap.set(n.id, idx + 1));
+  // 1. Visual ASCII Tree Map
+  md += `## 🌳 الخريطة الشجرية الهرمية البصرية (Box-Drawing Tree Map)\n\n`;
+  md += `\`\`\`text\n`;
+  md += generateASCIITreeMap(project);
+  md += `\n\`\`\`\n\n`;
+  md += `---\n\n`;
 
-  // 1. Summary table of nodes
-  md += `## 📊 فهرس العُقد والمربعات (التسلسل الثابت حسب الإنشاء والموقع)\n\n`;
-  md += `| الرقم | المعرف (ID) | العنوان | النوع | الموقع النسبي (X, Y) | الألوان |\n`;
-  md += `| :--- | :--- | :--- | :--- | :--- | :--- |\n`;
-  project.nodes.forEach((node) => {
-    const idxNum = nodeIndexMap.get(node.id) || 1;
+  // Map canvas node indices
+  const { nodeMetaMap, nodeMap } = getUnifiedCanvasNodeMap(project);
+  const sortedNodes = [...project.nodes].sort((a, b) => (nodeMetaMap.get(a.id)?.globalIndex || 0) - (nodeMetaMap.get(b.id)?.globalIndex || 0));
+
+  // 2. Summary table of nodes
+  md += `## 📊 1. فهرس العُقد والمربعات (التسلسل الهيكلي والموقع)\n\n`;
+  md += `| رقم وتصنيف العنصر | المعرف (ID) | العنوان | النوع | السلف/التبعية | الموقع النسبي (X, Y) | الألوان |\n`;
+  md += `| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`;
+  sortedNodes.forEach((node) => {
+    const meta = nodeMetaMap.get(node.id);
     const cat = NODE_CATEGORIES[node.type];
     const catName = cat ? cat.name : node.type;
-    md += `| **#${idxNum}** | \`${node.id}\` | **${node.title || 'بدون عنوان'}** | ${catName} | (${Math.round(node.x)}, ${Math.round(node.y)}) | ${node.color || '#3b82f6'} |\n`;
+    const displayTitle = getNodeDisplayTitle(node);
+    const labelTag = meta?.isMain
+      ? `**#${meta.mainSeqNum} رئيسي**`
+      : `**#${meta.branchSeqNum} فرعي** (لـ رئيسي #${meta.parentMainSeqNum})`;
+    const parentRef = meta?.isMain ? 'عنصر رئيسي' : `فرع تابع لـ رئيسي #${meta.parentMainSeqNum}`;
+    md += `| ${labelTag} | \`${node.id}\` | **${displayTitle}** | ${catName} | ${parentRef} | (${Math.round(node.x)}, ${Math.round(node.y)}) | ${node.color || '#3b82f6'} |\n`;
   });
   md += `\n---\n\n`;
 
-  // 2. Connections Table
+  // 3. Connections Table
   if (project.connections.length > 0) {
-    md += `## 🔗 شبكة العلاقات والروابط والتوجيه بالسهام\n\n`;
+    md += `## 🔗 2. شبكة العلاقات والروابط والتوجيه بالسهام\n\n`;
     md += `| المعرف | العنصر المصدر | العنصر الهدف | نوع العلاقة | توصيف اتجاه السهم والمؤشر |\n`;
     md += `| :--- | :--- | :--- | :--- | :--- |\n`;
     project.connections.forEach((conn) => {
-      const source = project.nodes.find((n) => n.id === conn.fromNodeId);
-      const target = project.nodes.find((n) => n.id === conn.toNodeId);
-      const srcIdx = source ? (nodeIndexMap.get(source.id) || '?') : '?';
-      const tgtIdx = target ? (nodeIndexMap.get(target.id) || '?') : '?';
+      const sourceRef = getNodeRefLabel(conn.fromNodeId, nodeMap, nodeMetaMap);
+      const targetRef = getNodeRefLabel(conn.toNodeId, nodeMap, nodeMetaMap);
 
-      const sourceTitle = source ? `**#${srcIdx} ${source.title}** (\`${source.id}\`)` : conn.fromNodeId;
-      const targetTitle = target ? `**#${tgtIdx} ${target.title}** (\`${target.id}\`)` : conn.toNodeId;
+      const sourceTitle = `**${sourceRef}** (\`${conn.fromNodeId}\`)`;
+      const targetTitle = `**${targetRef}** (\`${conn.toNodeId}\`)`;
 
       const arrowDirection = conn.bidirectional
-        ? '⬌ علاقة تبادلية (مزدوجة الاتجاه)'
-        : `➔ سهم موجه من #${srcIdx} (${source?.title || 'المصدر'}) إلى #${tgtIdx} (${target?.title || 'الهدف'}) دون تغيير الترتيب`;
+        ? `⬌ علاقة تبادلية (مزدوجة الاتجاه) بين ${sourceRef} و ${targetRef}`
+        : `➔ سهم موجه من ${sourceRef} إلى ${targetRef} دون تغيير الترتيب`;
 
       md += `| \`${conn.id}\` | ${sourceTitle} | ${targetTitle} | \`${conn.label || 'مرتبط بـ'}\` | ${arrowDirection} |\n`;
     });
     md += `\n---\n\n`;
   }
 
-  // 3. Detailed node contents categorized
-  md += `## 📝 التفاصيل الكاملة والملاحظات لكل عقدة\n\n`;
-  const categories = Object.keys(NODE_CATEGORIES) as Array<keyof typeof NODE_CATEGORIES>;
+  // 4. Main-Element First Detailed Hierarchical Tree Report
+  md += `## 📝 3. التوثيق الهيكلي والتفصيلي للعناصر الرئيسية وفروعها التابعة (Main-Element Branch Sequence)\n\n`;
+  md += `> 📌 **قانون البناء والشجرة:** يبدأ المخطط بالعنصر الرئيسي الأصغر رقماً (#1 رئيسي)، مستعرضاً عنوانه، نوعه، نص بداخله، إحداثياته وموقعه، ثم تفرعاته الشجرية بالكامل (#1, #2...) قبل الانتقال للعنصر الرئيسي التالي (#2 رئيسي) وفروعه التي تبدأ من #1 مجدداً.\n\n`;
+  md += `\`\`\`text\n`;
+  md += generateMainElementTreeReport(project);
+  md += `\n\`\`\`\n\n`;
 
-  categories.forEach((catKey) => {
-    const cat = NODE_CATEGORIES[catKey];
-    const catNodes = project.nodes.filter((n) => n.type === catKey);
-    if (catNodes.length === 0) return;
-
-    md += `### 📌 ${cat.namePlural} (${catNodes.length})\n\n`;
-    catNodes.forEach((node) => {
-      const idxNum = nodeIndexMap.get(node.id) || 1;
-      md += `#### 🔹 #${idxNum} - ${node.title || 'بدون عنوان'} (ID: \`${node.id}\`)\n`;
-      md += `- **الرقم التسلسلي الثابت:** #${idxNum}\n`;
-      md += `- **النوع:** ${cat.name}\n`;
-      md += `- **الإحداثيات:** X=${Math.round(node.x)}, Y=${Math.round(node.y)}\n`;
-      if (node.parentId) {
-        const parent = project.nodes.find((n) => n.id === node.parentId);
-        const parentIdx = parent ? (nodeIndexMap.get(parent.id) || '?') : '?';
-        md += `- **عقدة فرعية تابعة لـ:** ${parent ? `**#${parentIdx} ${parent.title}** (\`${parent.id}\`)` : node.parentId}\n`;
-      }
-      if (node.tags && node.tags.length > 0) {
-        md += `- **الوسوم:** ${node.tags.map((t) => `#${t}`).join(' ')}\n`;
-      }
-      md += `\n**المحتوى النصي الكامل:**\n`;
-      md += `\`\`\`text\n${node.content || '(لا يوجد نص دقيق داخل هذه العقدة)'}\n\`\`\`\n\n`;
-
-      if (node.internalNotes && node.internalNotes.trim()) {
-        md += `> 💡 **ملاحظات الكاتب السرية (Internal Writer Notes):**\n> ${node.internalNotes.replace(/\n/g, '\n> ')}\n\n`;
-      }
-
-      // Outgoing & incoming connections
-      const outgoing = project.connections.filter((c) => c.fromNodeId === node.id);
-      const incoming = project.connections.filter((c) => c.toNodeId === node.id);
-
-      if (outgoing.length > 0 || incoming.length > 0) {
-        md += `**الروابط والتوجيهات المباشرة بهذا العنصر:**\n`;
-        outgoing.forEach((c) => {
-          const target = project.nodes.find((n) => n.id === c.toNodeId);
-          const targetIdx = target ? (nodeIndexMap.get(target.id) || '?') : '?';
-          const direction = c.bidirectional
-            ? `⬌ علاقة تبادلية مع #${targetIdx} (${target?.title || ''})`
-            : `➔ السهم موجه من هذا العنصر (#${idxNum}) نحو العنصر #${targetIdx} (${target?.title || ''})`;
-          md += `- **[${c.label || 'مرتبط بـ'}]** مرتبط مع: **#${targetIdx} ${target ? target.title : c.toNodeId}** (${direction})\n`;
-        });
-        incoming.forEach((c) => {
-          const source = project.nodes.find((n) => n.id === c.fromNodeId);
-          const sourceIdx = source ? (nodeIndexMap.get(source.id) || '?') : '?';
-          const direction = c.bidirectional
-            ? `⬌ علاقة تبادلية مع #${sourceIdx} (${source?.title || ''})`
-            : `⬅ السهم موجه من العنصر #${sourceIdx} (${source?.title || ''}) نحو هذا العنصر (#${idxNum})`;
-          md += `- **[${c.label || 'مرتبط بـ'}]** موصول من: **#${sourceIdx} ${source ? source.title : c.fromNodeId}** (${direction})\n`;
-        });
-        md += `\n`;
-      }
-      md += `---\n\n`;
-    });
-  });
-
-  // Embedded Raw JSON for AI reading
+  // 5. Embedded Raw JSON for AI reading
   md += `## 🤖 البيانات الخام المضمّنة (Embedded Machine-Readable JSON)\n\n`;
   md += `يمكن لأي نموذج ذكاء اصطناعي (Gemini / Claude / ChatGPT) تحليل الكائن التالي مباشرة:\n\n`;
   md += `\`\`\`json\n${JSON.stringify(project, null, 2)}\n\`\`\`\n`;
@@ -659,9 +1183,98 @@ export interface AnalyzedNodeTopology {
   aiSchema: AISmartNodeSchema;
 }
 
+export interface HierarchicalNodeStep {
+  node: StoryNode;
+  originalIndex: number; // 1-based original index (#1, #2...)
+  depth: number; // 0 for Main/Root, 1 for Branch, 2 for Sub-branch...
+  parentMainIndex: number | null;
+  parentMainTitle: string | null;
+  parentBranchIndex: number | null;
+  parentBranchTitle: string | null;
+  readingOrder: number;
+  isMain: boolean;
+}
+
+export function buildHierarchicalTreeDFS(project: StoryProject): HierarchicalNodeStep[] {
+  const nodes = project.nodes || [];
+  const nodeMap = new Map<string, StoryNode>();
+  nodes.forEach((n) => nodeMap.set(n.id, n));
+
+  const { rootNodes, childrenMap, nodeIndexMap } = getUnifiedCanvasNodeMap(project);
+
+  const visited = new Set<string>();
+  const dfsResult: HierarchicalNodeStep[] = [];
+  let readingCounter = 1;
+
+  function traverseNode(
+    node: StoryNode, 
+    depth: number, 
+    currentMainIndex: number | null, 
+    currentMainTitle: string | null,
+    currentParentIndex: number | null,
+    currentParentTitle: string | null
+  ) {
+    if (visited.has(node.id)) return;
+    visited.add(node.id);
+
+    const origIdx = nodeIndexMap.get(node.id) || 1;
+    const nodeIsMain = depth === 0;
+
+    const mainIdx = nodeIsMain ? origIdx : currentMainIndex;
+    const mainTitle = nodeIsMain ? getNodeDisplayTitle(node) : currentMainTitle;
+
+    dfsResult.push({
+      node,
+      originalIndex: origIdx,
+      depth,
+      parentMainIndex: currentMainIndex,
+      parentMainTitle: currentMainTitle,
+      parentBranchIndex: currentParentIndex,
+      parentBranchTitle: currentParentTitle,
+      readingOrder: readingCounter++,
+      isMain: nodeIsMain
+    });
+
+    const unvisitedChildren = (childrenMap.get(node.id) || [])
+      .filter((ch) => ch && !visited.has(ch.id));
+
+    for (const child of unvisitedChildren) {
+      traverseNode(
+        child, 
+        depth + 1, 
+        mainIdx, 
+        mainTitle, 
+        origIdx, 
+        getNodeDisplayTitle(node)
+      );
+    }
+  }
+
+  // 1. Traverse all Root elements in bottom-to-top canvas order along with their sub-branches
+  rootNodes.forEach((rNode) => {
+    if (!visited.has(rNode.id)) {
+      traverseNode(rNode, 0, null, null, null, null);
+    }
+  });
+
+  // 2. Traverse any remaining unvisited nodes in ascending order of sequence numbers
+  const remainingNodes = nodes
+    .filter((n) => !visited.has(n.id))
+    .sort((a, b) => (nodeIndexMap.get(a.id) || 0) - (nodeIndexMap.get(b.id) || 0));
+
+  remainingNodes.forEach((orphanNode) => {
+    if (!visited.has(orphanNode.id)) {
+      traverseNode(orphanNode, 0, null, null, null, null);
+    }
+  });
+
+  return dfsResult;
+}
+
 export interface StoryTopologyAnalysis {
   nodes: Record<string, AnalyzedNodeTopology>;
   aiSmartSchemas: AISmartNodeSchema[];
+  dfsSteps: HierarchicalNodeStep[];
   readingGuide: {
     mustReadFirst: Array<{ id: string; smartId: string; title: string; narrativeRole: string; reason: string }>;
     mainPlotLine: Array<{ id: string; smartId: string; title: string; narrativeRole: string; level: number; sequence: number }>;
@@ -673,12 +1286,15 @@ export interface StoryTopologyAnalysis {
     fromId: string;
     fromSmartId: string;
     fromTitle: string;
+    fromIndex: number;
     toId: string;
     toSmartId: string;
     toTitle: string;
+    toIndex: number;
     label: string;
     semanticMeaning: string;
     bidirectional: boolean;
+    directionNote: string;
   }>;
 }
 
@@ -819,20 +1435,10 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
 
   // --- 2. SMART IDENTITY SYSTEM (MAIN vs BRANCH Identifiers) ---
   const isMainNode = (n: StoryNode): boolean => {
-    const inc = incomingMap.get(n.id) || [];
-    const out = outgoingMap.get(n.id) || [];
-    const titleLower = (n.title || '').toLowerCase();
-    const typeStr = n.type as string;
-    return (
-      typeStr === 'heading' ||
-      typeStr === 'event' ||
-      typeStr === 'ending' ||
-      typeStr === 'climax' ||
-      titleLower.includes('بداية') ||
-      titleLower.includes('ذروة') ||
-      titleLower.includes('نهاية') ||
-      (inc.length === 0 && out.length > 0)
-    );
+    if (n.parentId && nodeMap.has(n.parentId)) {
+      return false; // Explicit child branch under a parent
+    }
+    return true; // Top-level Root Main element
   };
 
   // Map original node indices to ensure stable numbering regardless of connection arrow direction
@@ -842,12 +1448,8 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
   const uuidToSmartIdMap = new Map<string, string>();
   const uuidToIdentityMap = new Map<string, { nodeType: 'MAIN' | 'BRANCH'; mainOrderId: number | null; branchOrderId: number | null; parentMainNode: string | null }>();
 
-  // Sort main candidates stably by original list index so arrow direction never swaps or renumbers MAIN nodes
-  const mainCandidates = nodes.filter(n => isMainNode(n)).sort((a, b) => {
-    const idxA = nodeOriginalIndexMap.get(a.id) ?? 0;
-    const idxB = nodeOriginalIndexMap.get(b.id) ?? 0;
-    return idxA - idxB;
-  });
+  // Sort main candidates stably by Canvas vertical bottom-to-top layout (b.y - a.y) so numbers match Canvas badges (#1, #2, #3...)
+  const mainCandidates = nodes.filter(n => isMainNode(n)).sort((a, b) => b.y - a.y || a.x - b.x);
 
   // If no main candidates, designate first root or node as main
   if (mainCandidates.length === 0 && nodes.length > 0) {
@@ -967,7 +1569,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
         dists.push({
           id: n2.id,
           smartId: uuidToSmartIdMap.get(n2.id) || n2.id,
-          title: n2.title || 'بدون عنوان',
+          title: getNodeDisplayTitle(n2),
           type: n2.type,
           distancePx: dist
         });
@@ -1052,7 +1654,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
       return {
         id: i.fromId,
         smartId: uuidToSmartIdMap.get(i.fromId) || i.fromId,
-        title: pNode?.title || 'بدون عنوان',
+        title: getNodeDisplayTitle(pNode),
         type: pNode?.type || 'box',
         relationLabel: i.label
       };
@@ -1063,7 +1665,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
       return {
         id: o.toId,
         smartId: uuidToSmartIdMap.get(o.toId) || o.toId,
-        title: sNode?.title || 'بدون عنوان',
+        title: getNodeDisplayTitle(sNode),
         type: sNode?.type || 'box',
         relationLabel: o.label
       };
@@ -1102,6 +1704,8 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     }
     const continueTo = readBefore.length > 0 ? readBefore[0] : null;
 
+    const displayTitle = getNodeDisplayTitle(n);
+
     const aiSchema: AISmartNodeSchema = {
       nodeId: smartId,
       nodeType: identity.nodeType,
@@ -1135,7 +1739,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
         continueTo
       },
       content: {
-        title: n.title || 'بدون عنوان',
+        title: displayTitle,
         description: `${n.content || ''}${n.internalNotes ? `\n\n[ملاحظات الكاتب السرية]: ${n.internalNotes}` : ''}`
       }
     };
@@ -1143,7 +1747,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     analyzedNodes[n.id] = {
       id: n.id,
       smartId,
-      title: n.title || 'بدون عنوان',
+      title: displayTitle,
       type: n.type,
       categoryName: NODE_CATEGORIES[n.type]?.name || 'مربع',
       content: n.content || '',
@@ -1163,16 +1767,20 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     };
   });
 
-  // Assign reading sequence numbers systematically based on original node ordering
+  // Assign reading sequence numbers systematically based on Depth-First Tree Traversal (DFS)
+  const dfsSteps = buildHierarchicalTreeDFS(project);
+  const dfsOrderMap = new Map<string, number>();
+  dfsSteps.forEach(step => dfsOrderMap.set(step.node.id, step.readingOrder));
+
   const nodeArray = Object.values(analyzedNodes);
   nodeArray.sort((a, b) => {
-    const idxA = nodeOriginalIndexMap.get(a.id) ?? 0;
-    const idxB = nodeOriginalIndexMap.get(b.id) ?? 0;
-    return idxA - idxB;
+    const seqA = dfsOrderMap.get(a.id) ?? 999;
+    const seqB = dfsOrderMap.get(b.id) ?? 999;
+    return seqA - seqB;
   });
 
-  nodeArray.forEach((an, idx) => {
-    const seq = idx + 1;
+  nodeArray.forEach((an) => {
+    const seq = dfsOrderMap.get(an.id) || 1;
     an.readingSequence = seq;
     an.aiSchema.orderingAndFlow.readingOrder = seq;
   });
@@ -1219,10 +1827,10 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     const fromSmart = uuidToSmartIdMap.get(c.fromNodeId) || c.fromNodeId;
     const toSmart = uuidToSmartIdMap.get(c.toNodeId) || c.toNodeId;
 
-    const fromIdx = (nodeOriginalIndexMap.get(c.fromNodeId) ?? 0) + 1;
-    const toIdx = (nodeOriginalIndexMap.get(c.toNodeId) ?? 0) + 1;
-    const fromTitle = from?.title || 'بدون عنوان';
-    const toTitle = to?.title || 'بدون عنوان';
+    const fromIdx = nodeOriginalIndexMap.get(c.fromNodeId) ?? 1;
+    const toIdx = nodeOriginalIndexMap.get(c.toNodeId) ?? 1;
+    const fromTitle = getNodeDisplayTitle(from);
+    const toTitle = getNodeDisplayTitle(to);
 
     const directionNote = c.bidirectional
       ? `علاقة تبادلية (سهم مزدوج ⬌ بين #${fromIdx} و #${toIdx})`
@@ -1248,6 +1856,7 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
   return {
     nodes: analyzedNodes,
     aiSmartSchemas,
+    dfsSteps,
     readingGuide: {
       mustReadFirst,
       mainPlotLine,
@@ -1268,14 +1877,14 @@ export function generateHTMLReport(project: StoryProject): string {
     .map(n => ({
       id: `grp_${n.id}`,
       type: n.type === 'heading' ? 'فصل/عنوان' : (n.type === 'place' ? 'موقع/مسرح' : 'مجموعة فرعية'),
-      title: n.title || 'مجموعة بدون عنوان',
+      title: getNodeDisplayTitle(n),
       parent: n.parentId ? `grp_${n.parentId}` : null
     }));
 
   const outlineNodes = project.nodes.map(n => ({
     id: n.id,
     type: n.type,
-    title: n.title || 'بدون عنوان',
+    title: getNodeDisplayTitle(n),
     group: n.parentId ? `grp_${n.parentId}` : null,
     color: n.color,
     tags: n.tags || [],
@@ -1295,7 +1904,7 @@ export function generateHTMLReport(project: StoryProject): string {
   const detailsMap: Record<string, { title: string; type: string; content: string; internalNotes?: string; tags?: string[] }> = {};
   project.nodes.forEach(n => {
     detailsMap[n.id] = {
-      title: n.title || 'بدون عنوان',
+      title: getNodeDisplayTitle(n),
       type: n.type,
       content: n.content || '',
       internalNotes: n.internalNotes || '',
@@ -1734,6 +2343,9 @@ ${jsonString}
       <button class="tab-btn active" onclick="switchTab('map-tab')">
         🗺️ الخريطة والمخطط التفاعلي
       </button>
+      <button class="tab-btn" onclick="switchTab('ascii-tree-tab')">
+        🌳 الخريطة الشجرية الهرمية (ASCII Map)
+      </button>
       <button class="tab-btn" onclick="switchTab('narrative-tab')">
         🧠 دليل التفرع والتسلسل السردي
       </button>
@@ -1801,13 +2413,27 @@ ${jsonString}
                   </span>
                   <span style="font-size:10px; color:var(--text-muted); font-family:monospace;">${node.id}</span>
                 </div>
-                <div class="map-node-title">${node.title || 'بدون عنوان'}</div>
+                <div class="map-node-title">${getNodeDisplayTitle(node)}</div>
                 <div class="map-node-preview">${node.content || '(انقر لرؤية المحتوى النصي الكامل والملاحظات)'}</div>
               </div>
             `;
           }).join('')}
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- TAB: Visual ASCII Box-Drawing Tree Map -->
+  <div id="ascii-tree-tab" class="tab-content">
+    <div style="max-width:900px; margin:0 auto; background:#1e293b; border:1px solid var(--border-color); border-radius:20px; padding:24px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:12px;">
+        <div>
+          <h2 style="color:var(--accent-cyan); font-size:20px; font-weight:800; margin:0;">🌳 الخريطة الشجرية الهرمية البصرية (Box-Drawing Tree Map)</h2>
+          <p style="color:var(--text-muted); font-size:13px; margin-top:4px;">تجسيد شجري دقيق ومنسق يوضح تسلسل الفروع والعناصر الرئيسية بنفس النمط الهيكلي.</p>
+        </div>
+        <button class="canvas-btn" onclick="copyASCIITree()">نسخ الخريطة الشجرية 📋</button>
+      </div>
+      <pre id="asciiTreeCode" style="background:#0f172a; color:#38bdf8; padding:24px; border-radius:14px; border:1px solid #334155; font-family:'Fira Code', 'Courier New', monospace; font-size:15px; line-height:1.7; overflow-x:auto; white-space:pre; direction:ltr; text-align:left;">${generateASCIITreeMap(project)}</pre>
     </div>
   </div>
 
@@ -2170,6 +2796,15 @@ ${jsonString}
     }
 
     // Copy helper
+    function copyASCIITree() {
+      const text = document.getElementById('asciiTreeCode')?.innerText;
+      if (text) {
+        navigator.clipboard.writeText(text).then(() => {
+          alert('تم نسخ الخريطة الشجرية إلى الحافظة بنجاح! ✓');
+        });
+      }
+    }
+
     function copyText(elementId) {
       const text = document.getElementById(elementId).innerText;
       navigator.clipboard.writeText(text).then(() => {
@@ -2296,119 +2931,87 @@ export function downloadAIPromptFile(project: StoryProject): void {
 }
 
 export function generateAIPrompt(project: StoryProject): string {
-  const topology = analyzeStoryTopology(project);
+  const nodeIndexMap = new Map<string, number>();
+  project.nodes.forEach((n, idx) => nodeIndexMap.set(n.id, idx + 1));
+
   let prompt = `================================================================================\n`;
-  prompt += `🤖 HIERARCHICAL SPATIAL & SMART IDENTITY AI STORY MATRIX / التوصيف السردي والمكاني الشامل للذكاء الاصطناعي\n`;
+  prompt += `🤖 HIERARCHICAL NARRATIVE & SPATIAL AI STORY MATRIX\n`;
+  prompt += `توصيف الخريطة والمخطط السردي الشامل للذكاء الاصطناعي (ChatGPT / Gemini / Claude)\n`;
   prompt += `================================================================================\n`;
-  prompt += `عنوان القصة: "${project.title}"\n`;
-  prompt += `الوصف العام: ${project.description || 'مشروع قصة سينمائية / رواية تفاعلية'}\n`;
-  prompt += `تاريخ التصدير والتوليد: ${new Date().toLocaleString('ar-EG')}\n`;
-  prompt += `إحصائيات المخطط: ${project.nodes.length} عقدة | ${project.connections.length} رابط درامي وسردي\n`;
-  prompt += `--------------------------------------------------------------------------------\n\n`;
-
-  prompt += `<STORY_SPATIAL_TOPOLOGY_SUMMARY>\n`;
-  prompt += `[PROJECT_TITLE]: "${project.title}"\n`;
-  prompt += `[TOTAL_NODES_COUNT]: ${project.nodes.length}\n`;
-  prompt += `[TOTAL_RELATIONS_COUNT]: ${project.connections.length}\n`;
-  prompt += `[MUST_READ_FIRST_ROOT_IDS]: ${topology.readingGuide.mustReadFirst.map(m => `${m.smartId} ("${m.title}")`).join(', ') || 'NONE'}\n`;
-  prompt += `[MAIN_PLOT_BACKBONE_SEQUENCE]: ${topology.readingGuide.mainPlotLine.map(m => `[#${m.sequence}|LVL:${m.level}|ID:${m.smartId}] "${m.title}"`).join(' -> ')}\n`;
-  prompt += `</STORY_SPATIAL_TOPOLOGY_SUMMARY>\n\n`;
-
-  prompt += `================================================================================\n`;
-  prompt += `SECTION 1: AI-OPTIMIZED SMART NODES SCHEMA (JSON ARRAY) / كائنات العقد الذكية المنظمة\n`;
+  prompt += `عنوان المشروع: "${project.title || 'مخطط القصة والرواية'}"\n`;
+  prompt += `الوصف العام: ${project.description || 'مشروع تفاعلي'}\n`;
+  prompt += `تاريخ التصدير: ${new Date().toLocaleString('ar-EG')}\n`;
+  prompt += `إحصائيات المخطط: ${project.nodes.length} عنصر/عقدة | ${project.connections.length} رابط وعلاقة درامية\n`;
   prompt += `================================================================================\n\n`;
+
+  prompt += `📌 [قواعد وقوانين التسلسل الهرمي واتجاه الأسهم]:\n`;
+  prompt += `1. المخطط يبدأ دائماً من العنصر الرئيسي الأصغر رقماً (#1 رئيسي)، مستعرضاً كافة معلوماته وإحداثياته وعلاقاته وفروعه بالكامل.\n`;
+  prompt += `2. عند الانتهاء من جميع الفروع الممتدة من العنصر الرئيسي #1، يتم الانتقال تلقائياً للعنصر الرئيسي التالي (#2 رئيسي) وفروعه وهكذا.\n`;
+  prompt += `3. ربط الأسهم بين العناصر ينقل التأثير والتفاعل الدرامي دون تغيير أرقام العناصر أو إعادة ترتيب التسلسل الأصلي.\n\n`;
+
+  // SECTION 1: VISUAL ASCII TREE MAP
+  prompt += `================================================================================\n`;
+  prompt += `SECTION 1: VISUAL HIERARCHICAL ASCII TREE MAP / الخريطة الشجرية الهرمية البصرية\n`;
+  prompt += `================================================================================\n\n`;
+  prompt += generateASCIITreeMap(project);
+  prompt += `\n\n`;
+
+  // SECTION 2: MAIN-ELEMENT FIRST FULL NARRATIVE & SPATIAL BRANCH SEQUENCE
+  prompt += `================================================================================\n`;
+  prompt += `SECTION 2: MAIN-ELEMENT BRANCH TREE SEQUENCE / الهيكل التتابعي للعناصر الرئيسية والفروع\n`;
+  prompt += `================================================================================\n\n`;
+  prompt += generateMainElementTreeReport(project);
+  prompt += `\n\n`;
+
+  // SECTION 3: CLEAN MACHINE-READABLE DATA (JSON)
+  prompt += `================================================================================\n`;
+  prompt += `SECTION 3: CLEAN MACHINE-READABLE STRUCTURED DATA / كائن البيانات الرقمية (JSON)\n`;
+  prompt += `================================================================================\n\n`;
+
+  const cleanProjectJson = {
+    title: project.title,
+    description: project.description,
+    exportedAt: new Date().toISOString(),
+    nodes: project.nodes.map((n, idx) => ({
+      index: idx + 1,
+      id: n.id,
+      title: getNodeDisplayTitle(n),
+      type: n.type,
+      parentId: n.parentId || null,
+      content: n.content || '',
+      internalNotes: n.internalNotes || '',
+      tags: n.tags || [],
+      x: Math.round(n.x),
+      y: Math.round(n.y)
+    })),
+    connections: project.connections.map(c => {
+      const src = project.nodes.find(n => n.id === c.fromNodeId);
+      const tgt = project.nodes.find(n => n.id === c.toNodeId);
+      return {
+        id: c.id,
+        fromIndex: src ? (nodeIndexMap.get(src.id) || 1) : 1,
+        fromTitle: getNodeDisplayTitle(src),
+        toIndex: tgt ? (nodeIndexMap.get(tgt.id) || 1) : 1,
+        toTitle: getNodeDisplayTitle(tgt),
+        label: c.label || 'مرتبط بـ',
+        bidirectional: !!c.bidirectional
+      };
+    })
+  };
 
   prompt += `\`\`\`json\n`;
-  prompt += JSON.stringify(topology.aiSmartSchemas, null, 2);
+  prompt += JSON.stringify(cleanProjectJson, null, 2);
   prompt += `\n\`\`\`\n\n`;
 
+  // SECTION 4: AI INSTRUCTIONS
   prompt += `================================================================================\n`;
-  prompt += `SECTION 2: EXHAUSTIVE NODE DESCRIPTOR CODES / تفاصيل العُقد مع الإحداثيات والتوجيه\n`;
-  prompt += `================================================================================\n\n`;
-
-  Object.values(topology.nodes).forEach((an, idx) => {
-    const origNode = project.nodes.find(n => n.id === an.id);
-    prompt += `<NODE_DESCRIPTOR index="${idx + 1}" smartId="${an.smartId}" uuid="${an.id}">\n`;
-    prompt += `  [SMART_NODE_ID]: "${an.smartId}"\n`;
-    prompt += `  [NODE_TYPE]: "${an.aiSchema.nodeType}"\n`;
-    prompt += `  [TITLE]: "${an.title}"\n`;
-    prompt += `  [SPATIAL_ADDRESS]: "${an.aiSchema.spatial.spatialAddress}" (Zone: ${an.aiSchema.spatial.childZone}, Cell: ${an.aiSchema.spatial.localIndex})\n`;
-    prompt += `  [ORDER_DIMENSIONS]:\n`;
-    prompt += `    - MainOrder: ${an.aiSchema.identity.mainOrderId !== null ? an.aiSchema.identity.mainOrderId : 'N/A (Branch)'}\n`;
-    prompt += `    - BranchOrder: ${an.aiSchema.identity.branchOrderId !== null ? an.aiSchema.identity.branchOrderId : 'N/A (Main)'}\n`;
-    prompt += `    - ReadingOrder: ${an.aiSchema.orderingAndFlow.readingOrder}\n`;
-    prompt += `    - StoryTimelineOrder: ${an.aiSchema.orderingAndFlow.storyOrder}\n`;
-    prompt += `  [TRAVERSAL_LOGIC]:\n`;
-    prompt += `    - Priority: ${an.aiSchema.orderingAndFlow.priority}\n`;
-    prompt += `    - Importance: ${an.aiSchema.orderingAndFlow.importance}\n`;
-    prompt += `    - ReadAfter: [${an.aiSchema.orderingAndFlow.readAfter.join(', ')}]\n`;
-    prompt += `    - ReadBefore: [${an.aiSchema.orderingAndFlow.readBefore.join(', ')}]\n`;
-    prompt += `    - DependsOn: [${an.aiSchema.orderingAndFlow.dependsOn.join(', ')}]\n`;
-    prompt += `    - ContinueTo: ${an.aiSchema.orderingAndFlow.continueTo || 'NONE'}\n`;
-    prompt += `  [SURROUNDING_NODES_SPATIAL]:\n`;
-    prompt += `    - North: ${an.aiSchema.spatial.surroundingNodes.north || 'NONE'}\n`;
-    prompt += `    - South: ${an.aiSchema.spatial.surroundingNodes.south || 'NONE'}\n`;
-    prompt += `    - East: ${an.aiSchema.spatial.surroundingNodes.east || 'NONE'}\n`;
-    prompt += `    - West: ${an.aiSchema.spatial.surroundingNodes.west || 'NONE'}\n`;
-
-    if (origNode) {
-      prompt += `  [CANVAS_COORDINATES_PX]: X=${Math.round(origNode.x)}, Y=${Math.round(origNode.y)}\n`;
-    }
-
-    prompt += `\n  [FULL_TEXT_CONTENT]:\n`;
-    prompt += `  """\n  ${an.content || '(لا يوجد نص تفصيلي داخل هذه العقدة)'}\n  """\n`;
-
-    if (an.internalNotes) {
-      prompt += `\n  [SECRET_WRITER_NOTES]:\n`;
-      prompt += `  """\n  ${an.internalNotes}\n  """\n`;
-    }
-
-    prompt += `</NODE_DESCRIPTOR>\n\n`;
-  });
-
+  prompt += `SECTION 4: INSTRUCTIONS FOR AI ASSISTANTS / توجيهات المساعد الذكي\n`;
   prompt += `================================================================================\n`;
-  prompt += `SECTION 3: SEMANTIC RELATIONSHIPS MATRIX / مصفوفة الروابط والعلاقات الدلالية\n`;
-  prompt += `================================================================================\n\n`;
-
-  prompt += `<RELATIONSHIPS_MATRIX_CODES>\n`;
-  topology.relationshipsCatalog.forEach((rel, rIdx) => {
-    prompt += `<RELATION index="${rIdx + 1}" id="${rel.id}">\n`;
-    prompt += `  [FROM]: "${rel.fromSmartId}" ("${rel.fromTitle}")\n`;
-    prompt += `  [TO]: "${rel.toSmartId}" ("${rel.toTitle}")\n`;
-    prompt += `  [RELATION_LABEL]: "${rel.label}"\n`;
-    prompt += `  [BIDIRECTIONAL]: ${rel.bidirectional ? 'YES' : 'NO'}\n`;
-    prompt += `  [SEMANTIC_MEANING]: "${rel.semanticMeaning}"\n`;
-    prompt += `</RELATION>\n`;
-  });
-  prompt += `</RELATIONSHIPS_MATRIX_CODES>\n\n`;
-
-  prompt += `================================================================================\n`;
-  prompt += `SECTION 4: RAW MACHINE-READABLE STRUCTURAL DATA / كائن البيانات الشامل\n`;
-  prompt += `================================================================================\n\n`;
-
-  prompt += `\`\`\`json\n`;
-  prompt += JSON.stringify({
-    metadata: {
-      projectTitle: project.title,
-      description: project.description,
-      nodeCount: project.nodes.length,
-      connectionCount: project.connections.length,
-      exportedAt: new Date().toISOString()
-    },
-    topologyAnalysis: topology,
-    rawProjectData: project
-  }, null, 2);
-  prompt += `\n\`\`\`\n\n`;
-
-  prompt += `================================================================================\n`;
-  prompt += `SECTION 5: AI SYSTEM INSTRUCTIONS & ANALYSIS REQUEST / توجيهات الذكاء الاصطناعي\n`;
-  prompt += `================================================================================\n`;
-  prompt += `أيها الذكاء الاصطناعي والمساعد الدرامي، يرجى استخدام جميع الأكواد البرمجية والتوصيفية المرفقة أعلاه للقيام بـ:\n`;
-  prompt += `1. فحص الشجرة والمسار الرئيسي (MAIN Plot Backbone) عبر أبعاد الترتيب الأربعة (MainOrder, BranchOrder, ReadingOrder, StoryOrder).\n`;
-  prompt += `2. تتبع العناوين المكانية الهرمية (SpatialAddresses مثل MAIN-A1-01) للتعرف على التوزيع البصري والمكاني للعقد والمجالات المجاورة (surroundingNodes).\n`;
-  prompt += `3. تقييم مسار القراءة (ReadingOrder) وتسلسل الأحداث الزمني (StoryOrder) والتأكد من عدم وجود تعارض درامي بين العقد السابقة (readAfter) واللاحقة (readBefore).\n`;
-  prompt += `4. استخراج الشخصيات والأماكن وربط علاقاتهم بالأحداث المباشرة.\n`;
-  prompt += `5. تقديم 5 اقتراحات تطويرية ملموسة تعزز من صراع الحبكة وتفتح تفريعات درامية غير متوقعة.\n`;
+  prompt += `أيها الذكاء الاصطناعي والمساعد السردي، استخدم جميع البيانات والروابط المنظمة أعلاه في تنفيذ ما يلي:\n`;
+  prompt += `1. قراءة المخطط تسلسلياً بدءاً من العنصر الرئيسي الأصغر رقماً (#1 رئيسي) وتصفح كافة فروع وفروع فروع هذا العنصر الرئيسي قبل الانتقال للرئيسي التالي #2.\n`;
+  prompt += `2. مراعاة روابط الأسهم والاتجاهات الموضحة في SECTION 2 لفهم العلاقات والروابط والتوجيهات الدرامية.\n`;
+  prompt += `3. مراعاة الموقع الفضائي والإحداثيات النسبية بين العناصر الرئيسية (أعلى اليمين، أسفل اليسار، الخ).\n`;
+  prompt += `4. استخراج الشخصيات، الأماكن، والصراعات الرئيسية والفرعية للقصة بصورة خالية من الأخطاء.\n`;
 
   return prompt;
 }

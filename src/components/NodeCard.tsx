@@ -18,9 +18,11 @@ import {
   Palette,
   Scaling,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  GitBranch,
+  GitCommit
 } from 'lucide-react';
-import { StoryNode, NODE_CATEGORIES, FontStyleOption, FontSizeOption, NODE_PALETTE_COLORS } from '../types/story';
+import { StoryNode, NODE_CATEGORIES, FontStyleOption, FontSizeOption, NODE_PALETTE_COLORS, StoryConnection } from '../types/story';
 import { getSpatialZoneForPos } from '../utils/storage';
 
 interface NodeCardProps {
@@ -39,6 +41,8 @@ interface NodeCardProps {
   onUpdateNode?: (updatedNode: StoryNode) => void;
   isConnectingSource: boolean;
   showCoordinates?: boolean;
+  allNodes?: StoryNode[];
+  connections?: StoryConnection[];
 }
 
 const NodeCardComponent: React.FC<NodeCardProps> = ({
@@ -48,6 +52,8 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
   isChildNode = false,
   isHoveredTarget = false,
   showCoordinates = true,
+  allNodes = [],
+  connections = [],
   onSelect,
   onExpand,
   onEdit,
@@ -67,8 +73,22 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
   const [showTextColorPicker, setShowTextColorPicker] = useState(false);
   const [showFontPicker, setShowFontPicker] = useState(false);
   const [showSizePicker, setShowSizePicker] = useState(false);
+  const [showParentPicker, setShowParentPicker] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Find connected node IDs
+  const connectedNodeIds = (connections || [])
+    .filter((c) => c.fromNodeId === node.id || c.toNodeId === node.id)
+    .map((c) => (c.fromNodeId === node.id ? c.toNodeId : c.fromNodeId));
+
+  const connectedNodes = allNodes.filter((n) => connectedNodeIds.includes(n.id));
+
+  const potentialParents = [...allNodes.filter((n) => n.id !== node.id)].sort((a, b) => {
+    const aConn = connectedNodeIds.includes(a.id) ? 0 : 1;
+    const bConn = connectedNodeIds.includes(b.id) ? 0 : 1;
+    return aConn - bConn;
+  });
 
   const cat = NODE_CATEGORIES[node.type] || NODE_CATEGORIES.box;
   // Fixed theme for Note element (no custom color modification), standard card color for others
@@ -309,6 +329,113 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
             <Maximize2 className="w-4 h-4 text-cyan-400" />
             <span className="hidden sm:inline">تفاصيل</span>
           </button>
+
+          {/* زر تغيير التبعية (تحويل لرئيسي / تحويل لفرعي) */}
+          {node.parentId ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onUpdateNode) {
+                  onUpdateNode({
+                    ...node,
+                    parentId: undefined,
+                    updatedAt: Date.now()
+                  });
+                }
+              }}
+              className="p-1.5 hover:bg-amber-500/20 text-amber-300 rounded-xl transition flex items-center gap-1 text-xs font-bold bg-amber-500/10 border border-amber-500/30"
+              title="تحويل هذا العنصر الفرعي إلى عنصر رئيسي مستقل"
+            >
+              <GitCommit className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">تحويل لرئيسي</span>
+            </button>
+          ) : (
+            <div className="relative">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (connectedNodes.length > 0 && onUpdateNode) {
+                    // Convert automatically to child of the connected node
+                    onUpdateNode({
+                      ...node,
+                      parentId: connectedNodes[0].id,
+                      updatedAt: Date.now()
+                    });
+                    setShowParentPicker(false);
+                  } else {
+                    // If no connection exists, toggle parent picker menu
+                    setShowParentPicker(!showParentPicker);
+                    setShowFontPicker(false);
+                    setShowColorPicker(false);
+                    setShowSizePicker(false);
+                  }
+                }}
+                className="p-1.5 hover:bg-cyan-500/20 text-cyan-300 rounded-xl transition flex items-center gap-1 text-xs font-bold bg-cyan-500/10 border border-cyan-500/30"
+                title={
+                  connectedNodes.length > 0 
+                    ? `تحويل هذا العنصر لفرع تابع لـ "${connectedNodes[0].title || 'العنصر المرتبط'}"`
+                    : "تحويل هذا العنصر الرئيسي إلى عنصر فرعي"
+                }
+              >
+                <GitBranch className="w-4 h-4 text-cyan-400" />
+                <span className="hidden sm:inline">تحويل لفرعي</span>
+              </button>
+
+              {showParentPicker && (
+                <div 
+                  className="absolute bottom-full mb-2 right-0 bg-slate-900 border-2 border-cyan-500 p-2 rounded-2xl shadow-2xl flex flex-col gap-1 w-64 max-h-60 overflow-y-auto z-50 animate-in fade-in zoom-in duration-150"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <div className="text-[11px] font-bold text-cyan-300 px-1 py-1 border-b border-slate-800 flex items-center justify-between">
+                    <span>اختر العنصر الأب الرئيسي:</span>
+                    <button 
+                      type="button"
+                      onClick={() => setShowParentPicker(false)}
+                      className="text-slate-400 hover:text-white text-xs px-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {potentialParents.length === 0 ? (
+                    <span className="text-xs text-slate-400 p-2 text-center">لا توجد عناصر أخرى لربطه بها</span>
+                  ) : (
+                    potentialParents.map((p) => {
+                      const isConn = connectedNodeIds.includes(p.id);
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onUpdateNode) {
+                              onUpdateNode({
+                                ...node,
+                                parentId: p.id,
+                                updatedAt: Date.now()
+                              });
+                            }
+                            setShowParentPicker(false);
+                          }}
+                          className={`flex items-center gap-2 p-2 text-xs font-semibold text-right rounded-xl transition group border ${
+                            isConn 
+                              ? 'bg-cyan-950/60 border-cyan-500/50 text-cyan-200 hover:bg-cyan-900/80' 
+                              : 'bg-transparent border-transparent text-slate-200 hover:bg-slate-800'
+                          }`}
+                        >
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${isConn ? 'bg-cyan-400 animate-pulse' : 'bg-slate-500'}`} />
+                          <span className="truncate flex-1">
+                            {isConn ? '🔗 (مرتبط) ' : ''}{p.title || 'بدون عنوان'}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* نوع الخط */}
           {!isNoteType && (

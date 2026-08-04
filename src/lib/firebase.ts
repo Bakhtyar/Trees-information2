@@ -46,6 +46,15 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 // --- Auth Helper Functions ---
 
+export async function deleteProjectFromFirestore(projectId: string) {
+  try {
+    if (!projectId) return;
+    await deleteDoc(doc(db, 'projects', projectId));
+  } catch (err) {
+    console.error('Error deleting project from Firestore:', err);
+  }
+}
+
 /**
  * Fetch user profile from Firestore by email
  */
@@ -308,17 +317,22 @@ export async function logoutFirebase() {
 
 // --- Firestore Sync Helper Functions ---
 
+function sanitizeForFirestore(data: any): any {
+  if (data === undefined || data === null) return null;
+  return JSON.parse(JSON.stringify(data));
+}
+
 /**
  * Save user profile to Firestore
  */
 export async function saveUserToFirestore(uid: string, userData: any) {
   try {
     const cleanEmail = userData.email ? userData.email.trim().toLowerCase() : null;
-    const docData = {
+    const docData = sanitizeForFirestore({
       ...userData,
       id: uid,
       updatedAt: Date.now()
-    };
+    });
 
     // Save to users collection
     await setDoc(doc(db, 'users', uid), docData, { merge: true });
@@ -339,12 +353,13 @@ export async function saveUserToFirestore(uid: string, userData: any) {
 export async function saveProjectToFirestore(userId: string, project: any, userEmail?: string) {
   try {
     if (!project || !project.id) return;
-    await setDoc(doc(db, 'projects', project.id), {
+    const cleanDoc = sanitizeForFirestore({
       ...project,
       userId,
       userEmail: userEmail ? userEmail.trim().toLowerCase() : '',
       syncedAt: Date.now()
-    }, { merge: true });
+    });
+    await setDoc(doc(db, 'projects', project.id), cleanDoc, { merge: true });
   } catch (err) {
     console.error('Error saving project to Firestore:', err);
   }

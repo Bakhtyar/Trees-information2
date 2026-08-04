@@ -207,6 +207,7 @@ export interface StoryConnection {
 
 export interface UserProfile {
   id: string;
+  uid?: string;
   name: string;
   email: string;
   password?: string;

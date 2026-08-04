@@ -19,7 +19,8 @@ import {
   deleteProject,
   getUserProfile,
   saveUserProfile,
-  exportToJSON
+  exportToJSON,
+  syncUserProjectsFromCloud
 } from './utils/storage';
 import { SAMPLE_DETECTIVE_PROJECT, BLANK_PROJECT_TEMPLATE } from './utils/sampleProject';
 import { Dashboard } from './components/Dashboard';
@@ -32,7 +33,7 @@ import { ConnectionModal } from './components/ConnectionModal';
 import { SearchModal } from './components/SearchModal';
 import { ExportImportModal } from './components/ExportImportModal';
 import { GuideModal } from './components/GuideModal';
-import { getRedirectResult } from 'firebase/auth';
+import { getRedirectResult, onAuthStateChanged } from 'firebase/auth';
 import { auth, saveUserToFirestore, getUserFromFirestoreByEmail } from './lib/firebase';
 
 export default function App() {
@@ -92,6 +93,58 @@ export default function App() {
   const isDraggingNodeRef = useRef(false);
   const dragTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Check for Firebase Auth state changes and sync cloud projects automatically across hosts
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        let cleanEmail = firebaseUser.email || 'author@gmail.com';
+        let cleanName = firebaseUser.displayName || cleanEmail.split('@')[0] || 'كاتب المخططات';
+        let uid = firebaseUser.uid;
+
+        const existingDoc = await getUserFromFirestoreByEmail(cleanEmail);
+        let profileToSave: UserProfile;
+
+        if (existingDoc) {
+          profileToSave = {
+            ...existingDoc,
+            id: uid,
+            uid: uid,
+            email: cleanEmail,
+            googleConnected: true,
+            avatar: firebaseUser.photoURL || existingDoc.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
+          };
+        } else {
+          profileToSave = {
+            id: uid,
+            uid: uid,
+            email: cleanEmail,
+            name: cleanName,
+            googleConnected: true,
+            createdAt: Date.now(),
+            lastSyncedAt: Date.now(),
+            avatar: firebaseUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(cleanEmail)}`
+          };
+          await saveUserToFirestore(uid, profileToSave);
+        }
+
+        saveUserProfile(profileToSave);
+        setUserProfile(profileToSave);
+
+        // Fetch & sync cloud projects automatically across all devices/hosts
+        const syncedProjects = await syncUserProjectsFromCloud(uid, cleanEmail);
+        setProjectsList(syncedProjects);
+        const curActiveId = getActiveProjectId();
+        const activeProj = syncedProjects.find(p => p.id === curActiveId) || syncedProjects[0];
+        if (activeProj) {
+          setActiveId(activeProj.id);
+          setProject(activeProj);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   // Check for Google Sign-in redirect result
   useEffect(() => {
     getRedirectResult(auth).then(async (result) => {
@@ -121,6 +174,7 @@ export default function App() {
         
         saveUserProfile(profileToSave);
         setUserProfile(profileToSave);
+        await syncUserProjectsFromCloud(uid, cleanEmail);
         setIsAccountModalOpen(true);
       }
     }).catch(error => {
@@ -136,6 +190,12 @@ export default function App() {
     const list = loadAllProjects();
     setProjectsList(list);
     setUserProfile(getUserProfile());
+    const curActiveId = getActiveProjectId();
+    const activeProj = list.find(p => p.id === curActiveId) || list[0];
+    if (activeProj) {
+      setActiveId(activeProj.id);
+      setProject(activeProj);
+    }
   }, []);
 
   // History Recording Helper

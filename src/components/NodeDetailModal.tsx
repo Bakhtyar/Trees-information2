@@ -14,7 +14,9 @@ import {
   Trash2, 
   Save, 
   Link2,
-  ArrowRight
+  ArrowRight,
+  GitBranch,
+  Sparkles
 } from 'lucide-react';
 import { 
   StoryNode, 
@@ -23,6 +25,7 @@ import {
   NODE_PALETTE_COLORS,
   StoryConnection
 } from '../types/story';
+import { getNodeDisplayTitle } from '../utils/storage';
 
 interface NodeDetailModalProps {
   node: StoryNode | null;
@@ -54,6 +57,7 @@ export const NodeDetailModal: React.FC<NodeDetailModalProps> = ({
   const [color, setColor] = useState(node.color);
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState<string[]>(node.tags || []);
+  const [parentId, setParentId] = useState<string | undefined>(node.parentId);
 
   useEffect(() => {
     setTitle(node.title);
@@ -62,6 +66,7 @@ export const NodeDetailModal: React.FC<NodeDetailModalProps> = ({
     setType(node.type);
     setColor(node.color);
     setTags(node.tags || []);
+    setParentId(node.parentId);
   }, [node]);
 
   const handleAddTag = (e: React.KeyboardEvent) => {
@@ -88,6 +93,7 @@ export const NodeDetailModal: React.FC<NodeDetailModalProps> = ({
       type,
       color,
       tags,
+      parentId: parentId || undefined,
       updatedAt: Date.now()
     });
     onClose();
@@ -304,6 +310,94 @@ export const NodeDetailModal: React.FC<NodeDetailModalProps> = ({
                 );
               })}
             </div>
+          </div>
+
+          {/* 1.5. تبعية العنصر (رئيسي / فرعي) */}
+          <div className="bg-slate-800/60 border border-slate-700/80 rounded-2xl p-4 shadow-sm">
+            <label className="block text-xs font-bold text-slate-300 mb-2 flex items-center gap-2">
+              <GitBranch className="w-4 h-4 text-cyan-400" />
+              <span>تصنيف وهيكلية العنصر (رئيسي / فرعي):</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setParentId(undefined)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition border ${
+                  !parentId
+                    ? 'bg-amber-500/20 border-amber-500 text-amber-300 shadow-md ring-2 ring-amber-500/30'
+                    : 'bg-slate-900/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>📌 عنصر رئيسي (Root)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const connectedNodeIds = (connections || [])
+                    .filter((c) => c.fromNodeId === node.id || c.toNodeId === node.id)
+                    .map((c) => (c.fromNodeId === node.id ? c.toNodeId : c.fromNodeId));
+                  const connectedNode = allNodes.find((n) => connectedNodeIds.includes(n.id));
+
+                  if (!parentId) {
+                    if (connectedNode) {
+                      setParentId(connectedNode.id);
+                    } else {
+                      const potential = allNodes.filter((n) => n.id !== node.id);
+                      if (potential.length > 0) {
+                        setParentId(potential[0].id);
+                      }
+                    }
+                  }
+                }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition border ${
+                  parentId
+                    ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300 shadow-md ring-2 ring-cyan-500/30'
+                    : 'bg-slate-900/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                <span>🌿 عنصر فرعي (Child Branch)</span>
+              </button>
+            </div>
+
+            {parentId && (
+              <div className="mt-3 pt-3 border-t border-slate-700/60">
+                <label className="block text-[11px] font-bold text-cyan-300 mb-1.5">
+                  اختر العنصر الرئيسي / الأب الذي يتبع له هذا العنصر:
+                </label>
+                <select
+                  value={parentId}
+                  onChange={(e) => setParentId(e.target.value || undefined)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm font-semibold text-slate-100 focus:outline-none focus:border-cyan-500 transition"
+                >
+                  {(() => {
+                    const connectedNodeIds = (connections || [])
+                      .filter((c) => c.fromNodeId === node.id || c.toNodeId === node.id)
+                      .map((c) => (c.fromNodeId === node.id ? c.toNodeId : c.fromNodeId));
+
+                    const sortedList = [...allNodes.filter((n) => n.id !== node.id)].sort((a, b) => {
+                      const aConn = connectedNodeIds.includes(a.id) ? 0 : 1;
+                      const bConn = connectedNodeIds.includes(b.id) ? 0 : 1;
+                      if (aConn !== bConn) return aConn - bConn;
+                      const idxA = allNodes.findIndex((item) => item.id === a.id);
+                      const idxB = allNodes.findIndex((item) => item.id === b.id);
+                      return idxA - idxB;
+                    });
+
+                    return sortedList.map((n) => {
+                      const isConn = connectedNodeIds.includes(n.id);
+                      return (
+                        <option key={n.id} value={n.id}>
+                          {isConn ? '🔗 [مرتبط مباشرة] ' : ''}#{allNodes.findIndex((item) => item.id === n.id) + 1} - {getNodeDisplayTitle(n)} ({NODE_CATEGORIES[n.type]?.name || n.type})
+                        </option>
+                      );
+                    });
+                  })()}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* 2. تخصيص لون المربع */}

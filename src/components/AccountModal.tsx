@@ -19,7 +19,15 @@ import {
   EyeOff
 } from 'lucide-react';
 import { UserProfile } from '../types/story';
-import { saveUserProfile, exportAllCloudBackup, importAllCloudBackup, loadAllProjects, saveProject } from '../utils/storage';
+import { 
+  saveUserProfile, 
+  exportAllCloudBackup, 
+  importAllCloudBackup, 
+  loadAllProjects, 
+  saveProject,
+  syncUserProjectsFromCloud,
+  clearUserSessionAndResetToGuest
+} from '../utils/storage';
 import { 
   loginWithGoogle, 
   registerWithEmail, 
@@ -177,20 +185,12 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     onUpdateUser(updatedProfile);
     await saveUserToFirestore(uid!, updatedProfile);
 
-    // Fetch user's remote projects from Firestore
-    const remoteProjects = await getUserProjectsFromFirestore(uid!, cleanEmail);
-    if (remoteProjects && remoteProjects.length > 0) {
-      for (const proj of remoteProjects) {
-        saveProject(proj);
-      }
-    } else {
-      const localProjects = loadAllProjects();
-      await saveAllProjectsToFirestore(uid!, localProjects, cleanEmail);
-    }
+    // Sync cloud projects from Firestore instantly
+    const synced = await syncUserProjectsFromCloud(uid!, cleanEmail);
 
     setRestoreStatus({
       type: 'success',
-      msg: `تم تسجيل الدخول بحساب Google (${cleanEmail}) واسترجاع مشاريعك السحابية بنجاح!`
+      msg: `تم تسجيل الدخول بحساب Google (${cleanEmail}) واسترجاع مشاريعك السحابية (${synced.length}) بنجاح!`
     });
     onRefreshProjects();
   };
@@ -319,24 +319,12 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     saveUserProfile(loggedInProfile);
     onUpdateUser(loggedInProfile);
 
-    // Download user's projects from Firestore server
-    const remoteProjects = await getUserProjectsFromFirestore(finalUid, cleanEmail);
-    if (remoteProjects && remoteProjects.length > 0) {
-      for (const proj of remoteProjects) {
-        saveProject(proj);
-      }
-      setRestoreStatus({
-        type: 'success',
-        msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح واسترجاع عدد (${remoteProjects.length}) من مشاريعك ورواياتك من السيرفر السحابي.`
-      });
-    } else {
-      const localProjects = loadAllProjects();
-      await saveAllProjectsToFirestore(finalUid, localProjects, cleanEmail);
-      setRestoreStatus({
-        type: 'success',
-        msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح وتوثيق الحساب على السيرفر السحابي.`
-      });
-    }
+    // Sync user's cloud projects from Firestore server
+    const synced = await syncUserProjectsFromCloud(finalUid, cleanEmail);
+    setRestoreStatus({
+      type: 'success',
+      msg: `أهلاً بك مجدداً يا ${finalName}! تم تسجيل الدخول بنجاح واسترجاع عدد (${synced.length}) من مشاريعك ورواياتك من السيرفر السحابي.`
+    });
 
     onRefreshProjects();
   };
@@ -419,13 +407,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     onUpdateUser(updatedProfile);
     await saveUserToFirestore(uid, updatedProfile);
 
-    // Fetch remote projects from Firestore
-    const remoteProjects = await getUserProjectsFromFirestore(uid, cleanEmail);
-    if (remoteProjects && remoteProjects.length > 0) {
-      for (const proj of remoteProjects) {
-        saveProject(proj);
-      }
-    }
+    // Sync remote projects from Firestore
+    const synced = await syncUserProjectsFromCloud(uid, cleanEmail);
 
     setIsSubmittingInstantReset(false);
     setIsForgotPassword(false);
@@ -434,7 +417,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
 
     setRestoreStatus({
       type: 'success',
-      msg: `تم تحديث كلمة المرور وتسجيل دخولك بنجاح! تم استرجاع مشاريعك بالكامل.`
+      msg: `تم تحديث كلمة المرور وتسجيل دخولك بنجاح! تم استرجاع مشاريعك (${synced.length}) بالكامل.`
     });
     onRefreshProjects();
   };
@@ -442,39 +425,25 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   // Unlink Google account after user confirms
   const confirmUnlinkAccount = async () => {
     await logoutFirebase();
-    const unlinkedProfile: UserProfile = {
-      ...user,
-      googleConnected: false,
-      createdAt: Date.now(),
-      lastSyncedAt: Date.now()
-    };
-    saveUserProfile(unlinkedProfile);
-    onUpdateUser(unlinkedProfile);
+    clearUserSessionAndResetToGuest();
     setShowUnlinkConfirm(false);
     setRestoreStatus({
       type: 'success',
-      msg: 'تم إلغاء ربط الحساب بالسيرفر السحابي بنجاح. مشاريعك محفوظة محلياً في هذا المتصفح.'
+      msg: 'تم إلغاء ربط الحساب وتسجيل الخروج بنجاح.'
     });
+    onRefreshProjects();
   };
 
   // Logout of session after user confirms
   const confirmLogoutSession = async () => {
     await logoutFirebase();
-    const loggedOutProfile: UserProfile = {
-      id: 'guest',
-      name: 'كاتب زائر',
-      email: '',
-      googleConnected: false,
-      createdAt: Date.now(),
-      lastSyncedAt: Date.now()
-    };
-    saveUserProfile(loggedOutProfile);
-    onUpdateUser(loggedOutProfile);
+    clearUserSessionAndResetToGuest();
     setShowLogoutConfirm(false);
     setRestoreStatus({
       type: 'success',
       msg: 'تم تسجيل الخروج من الحساب بنجاح. يمكنك تسجيل الدخول مجدداً في أي وقت.'
     });
+    onRefreshProjects();
   };
 
   const handleFileRestore = (e: React.ChangeEvent<HTMLInputElement>) => {
