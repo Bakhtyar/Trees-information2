@@ -32,6 +32,8 @@ import { ConnectionModal } from './components/ConnectionModal';
 import { SearchModal } from './components/SearchModal';
 import { ExportImportModal } from './components/ExportImportModal';
 import { GuideModal } from './components/GuideModal';
+import { getRedirectResult } from 'firebase/auth';
+import { auth, saveUserToFirestore, getUserFromFirestoreByEmail } from './lib/firebase';
 
 export default function App() {
   const [view, setView] = useState<'dashboard' | 'editor'>('dashboard');
@@ -40,12 +42,26 @@ export default function App() {
   const [project, setProject] = useState<StoryProject>(() => loadProject(activeId));
   const [userProfile, setUserProfile] = useState<UserProfile>(() => getUserProfile());
 
-  const [isDark, setIsDark] = useState<boolean>(true);
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    const saved = localStorage.getItem('pref-isDark');
+    return saved !== null ? saved === 'true' : true;
+  });
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
 
   // Interactive modes & Selection state
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('select');
-  const [showCoordinates, setShowCoordinates] = useState<boolean>(true);
+  const [showCoordinates, setShowCoordinates] = useState<boolean>(() => {
+    const saved = localStorage.getItem('pref-showCoords');
+    return saved !== null ? saved === 'true' : true;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('pref-isDark', isDark.toString());
+  }, [isDark]);
+
+  useEffect(() => {
+    localStorage.setItem('pref-showCoords', showCoordinates.toString());
+  }, [showCoordinates]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
 
@@ -75,6 +91,42 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<StoryProject[]>([]);
   const isDraggingNodeRef = useRef(false);
   const dragTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Check for Google Sign-in redirect result
+  useEffect(() => {
+    getRedirectResult(auth).then(async (result) => {
+      if (result && result.user) {
+        const user = result.user;
+        let cleanEmail = user.email || 'author@gmail.com';
+        let cleanName = user.displayName || cleanEmail.split('@')[0] || 'كاتب المخططات';
+        let uid = user.uid;
+        
+        const existingDoc = await getUserFromFirestoreByEmail(cleanEmail);
+        let profileToSave;
+        
+        if (existingDoc) {
+          profileToSave = existingDoc;
+        } else {
+          profileToSave = {
+            id: uid,
+            uid: uid,
+            email: cleanEmail,
+            name: cleanName,
+            googleConnected: true,
+            createdAt: Date.now(),
+            lastSyncedAt: Date.now()
+          };
+          await saveUserToFirestore(uid, profileToSave);
+        }
+        
+        saveUserProfile(profileToSave);
+        setUserProfile(profileToSave);
+        setIsAccountModalOpen(true);
+      }
+    }).catch(error => {
+      console.error("Google Redirect Auth Error:", error);
+    });
+  }, []);
 
   // Auto-save debounce ref
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -685,6 +737,7 @@ export default function App() {
           onAddNodeAtPosition={handleAddNodeAtPosition}
           isDark={isDark}
           showCoordinates={showCoordinates}
+          onCenterView={handleCenterView}
         />
 
         {/* شريط الأدوات العائم لإضافة المربعات وتغيير وضع العمل */}

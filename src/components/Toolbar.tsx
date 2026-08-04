@@ -277,13 +277,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           )}
 
-          <button
-            onClick={onCenterView}
-            className="p-1.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded-xl border border-slate-700/50 transition"
-            title="توسيط اللوحة وعرض العناصر"
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-          </button>
+          
         </div>
 
         {/* قائمة إضافة عناصر جديدة */}

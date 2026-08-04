@@ -3,6 +3,8 @@ import {
   getAuth, 
   GoogleAuthProvider, 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   sendPasswordResetEmail, 
@@ -22,26 +24,22 @@ import {
   where, 
   deleteDoc 
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
-
-// Initialize Firebase App
-const envConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
+const firebaseConfig = {
+  apiKey: "AIzaSyD-2gB2CeYBqBTAX5oqD6LAz5WyoiY0tvg",
+  authDomain: "vercel111.firebaseapp.com",
+  projectId: "vercel111",
+  storageBucket: "vercel111.firebasestorage.app",
+  messagingSenderId: "118085727200",
+  appId: "1:118085727200:web:f401c14f46afb16556f185",
+  measurementId: "G-P91N8C6D18"
 };
 
-const activeConfig = envConfig.apiKey ? envConfig : firebaseConfig;
-const app = !getApps().length ? initializeApp(activeConfig) : getApp();
+// Initialize Firebase App
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // Initialize Services
 export const auth = getAuth(app);
-export const db = firebaseConfig.firestoreDatabaseId 
-  ? getFirestore(app, firebaseConfig.firestoreDatabaseId) 
-  : getFirestore(app);
+export const db = getFirestore(app);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -99,9 +97,12 @@ export async function getUserFromFirestoreByEmail(email: string) {
 export async function loginWithGoogle(userEmailHint?: string) {
   try {
     const result = await signInWithPopup(auth, googleProvider);
-    return { user: result.user, error: null, fallback: false };
+    if (result && result.user) {
+      return { user: result.user, error: null, fallback: false, redirecting: false };
+    }
   } catch (err: any) {
-    console.error('Google Sign-in Note:', err);
+    console.warn('Google Sign-in Popup Note:', err);
+    // Do NOT call signInWithRedirect here, as it navigates the iframe to Google OAuth which returns 403 in embedded frames.
     const targetEmail = userEmailHint ? userEmailHint.trim().toLowerCase() : '';
     if (targetEmail) {
       const existingDoc = await getUserFromFirestoreByEmail(targetEmail);
@@ -134,10 +135,15 @@ export async function loginWithGoogle(userEmailHint?: string) {
     }
     return { 
       user: null, 
-      error: 'تعذر فتح نافذة Google. يرجى كتابة بريدك الإلكتروني بالأسفل للربط السحابي المباشر.', 
+      error: 'تعذر فتح نافذة Google المنبثقة في بيئة العرض المباشرة. يمكنك كتابة بريدك الإلكتروني أدناه لتسجيل الدخول والربط السحابي المباشر.', 
       fallback: false 
     };
   }
+  return { 
+    user: null, 
+    error: 'تعذر فتح نافذة Google. يرجى استخدام بريدك الإلكتروني للربط السحابي المباشر.', 
+    fallback: false 
+  };
 }
 
 /**

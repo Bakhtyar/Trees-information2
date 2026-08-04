@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, ZoomIn, ZoomOut, RotateCcw, Maximize } from 'lucide-react';
+import { Plus, ZoomIn, ZoomOut, Maximize2, RotateCcw, Maximize } from 'lucide-react';
 import { StoryNode, StoryConnection, NodeCategory } from '../types/story';
 import { NodeCard } from './NodeCard';
 import { ConnectionLines } from './ConnectionLines';
@@ -27,6 +27,7 @@ interface CanvasProps {
   onAddNodeAtPosition?: (type: NodeCategory, x: number, y: number, connectFromNodeId?: string) => void;
   isDark: boolean;
   showCoordinates?: boolean;
+  onCenterView?: () => void;
 }
 
 // Quantized, memoized Spatial Grid Overlay to eliminate lag during dragging/panning
@@ -36,7 +37,9 @@ const SpatialGridOverlay = React.memo<{
   containerRef: React.RefObject<HTMLDivElement | null>;
   nodes: StoryNode[];
   showCoordinates?: boolean;
-}>(({ canvasView, isDark, containerRef, nodes, showCoordinates = true }) => {
+}>(({ canvasView, isDark, containerRef, nodes, showCoordinates = true,
+  onCenterView
+}) => {
   if (!showCoordinates) return null;
 
   const width = containerRef.current?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
@@ -196,20 +199,22 @@ export const Canvas: React.FC<CanvasProps> = ({
   onStartConnectionBetween,
   onAddNodeAtPosition,
   isDark,
-  showCoordinates = true
+  showCoordinates = true,
+  onCenterView
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Pan state
-  const [isPanning, setIsPanning] = useState(false);
-  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const isPanningRef = useRef(false);
+  const panStartRef = useRef({ x: 0, y: 0 });
 
   // Node Drag state
-  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
-  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const draggingNodeIdRef = useRef<string | null>(null);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
 
   // Connect Mode temporary line state
   const [connectingFromNodeId, setConnectingFromNodeId] = useState<string | null>(null);
+  const [localDragPos, setLocalDragPos] = useState<{ id: string; x: number; y: number } | null>(null);
   const [mouseCanvasPos, setMouseCanvasPos] = useState<{ x: number; y: number } | null>(null);
 
   // Anchor Drag-to-Connect and Quick Node Spawning (Ghost Box) state
@@ -217,6 +222,13 @@ export const Canvas: React.FC<CanvasProps> = ({
     sourceNodeId: string;
     sourceAnchorPos: 'top' | 'right' | 'bottom' | 'left';
     startWorldPos: { x: number; y: number };
+  } | null>(null);
+
+  const nodeDragStartRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    startNodeX: number;
+    startNodeY: number;
   } | null>(null);
 
   // Convert mouse client coordinates to canvas world coordinates
@@ -326,16 +338,16 @@ export const Canvas: React.FC<CanvasProps> = ({
     };
   }, []);
 
-  const getClientCoords = (e: React.PointerEvent | React.MouseEvent | React.TouchEvent) => {
-    if ('touches' in e && e.touches.length > 0) {
+  const getClientCoords = (e: React.PointerEvent | React.MouseEvent | React.TouchEvent | PointerEvent | TouchEvent) => {
+    if ('touches' in e && e.touches && e.touches.length > 0) {
       return { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
     }
-    if ('changedTouches' in e && e.changedTouches.length > 0) {
+    if ('changedTouches' in e && e.changedTouches && e.changedTouches.length > 0) {
       return { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY };
     }
     return {
-      clientX: (e as React.MouseEvent).clientX,
-      clientY: (e as React.MouseEvent).clientY
+      clientX: (e as MouseEvent | PointerEvent).clientX,
+      clientY: (e as MouseEvent | PointerEvent).clientY
     };
   };
 
@@ -346,12 +358,9 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     onSelectNode(null);
     onSelectConnection(null);
-    setIsPanning(true);
+    isPanningRef.current = true;
     const { clientX, clientY } = getClientCoords(e);
-    setPanStart({
-      x: clientX - canvasView.x,
-      y: clientY - canvasView.y
-    });
+    panStartRef.current = { x: clientX - canvasView.x, y: clientY - canvasView.y };
     if (connectingFromNodeId) {
       setConnectingFromNodeId(null);
     }
@@ -365,6 +374,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Start dragging a node
   const handleNodeDragStart = (e: React.PointerEvent | React.MouseEvent | React.TouchEvent, node: StoryNode) => {
     e.stopPropagation();
+    if (draggingNodeIdRef.current) return; // Prevent double-fire or multi-touch glitches
 
     const { clientX, clientY } = getClientCoords(e);
 
@@ -381,19 +391,16 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     onSelectNode(node);
     onSelectConnection(null);
-    setDraggingNodeId(node.id);
+    draggingNodeIdRef.current = node.id;
+    isPanningRef.current = false;
 
-    const canvasPos = clientToCanvas(clientX, clientY);
-    setDragOffset({
-      x: canvasPos.x - node.x,
-      y: canvasPos.y - node.y
-    });
-
-    try {
-      if ('pointerId' in e && e.currentTarget) {
-        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-      }
-    } catch (err) {}
+    nodeDragStartRef.current = {
+      startClientX: clientX,
+      startClientY: clientY,
+      startNodeX: node.x,
+      startNodeY: node.y
+    };
+    setLocalDragPos({ id: node.id, x: node.x, y: node.y });
   };
 
   // Start Anchor Dragging (from anchor point)
@@ -442,28 +449,35 @@ export const Canvas: React.FC<CanvasProps> = ({
   );
 
   // Handle global move (pointer / mouse / touch)
-  const handleMove = (e: React.PointerEvent | React.MouseEvent | React.TouchEvent) => {
+  const handleMove = useCallback((e: React.PointerEvent | React.MouseEvent | React.TouchEvent | PointerEvent | TouchEvent) => {
     const { clientX, clientY } = getClientCoords(e);
     const canvasPos = clientToCanvas(clientX, clientY);
     setMouseCanvasPos(canvasPos);
 
-    if (isPanning) {
+    if (isPanningRef.current) {
       onUpdateCanvasView({
         ...canvasView,
-        x: clientX - panStart.x,
-        y: clientY - panStart.y
+        x: clientX - panStartRef.current.x,
+        y: clientY - panStartRef.current.y
       });
-    } else if (draggingNodeId) {
-      const newX = Math.round((canvasPos.x - dragOffset.x) / 10) * 10;
-      const newY = Math.round((canvasPos.y - dragOffset.y) / 10) * 10;
-      onMoveNode(draggingNodeId, newX, newY);
+    } else if (draggingNodeIdRef.current && nodeDragStartRef.current) {
+      const dx = (clientX - nodeDragStartRef.current.startClientX) / canvasView.zoom;
+      const dy = (clientY - nodeDragStartRef.current.startClientY) / canvasView.zoom;
+      const newX = Math.round((nodeDragStartRef.current.startNodeX + dx) / 10) * 10;
+      const newY = Math.round((nodeDragStartRef.current.startNodeY + dy) / 10) * 10;
+      setLocalDragPos({ id: draggingNodeIdRef.current, x: newX, y: newY });
     }
-  };
+  }, [canvasView, clientToCanvas, onUpdateCanvasView]);
 
   // End drag/pan/anchor connection
-  const handleEnd = () => {
-    setIsPanning(false);
-    setDraggingNodeId(null);
+  const handleEnd = useCallback(() => {
+    if (draggingNodeIdRef.current && localDragPos && localDragPos.id === draggingNodeIdRef.current) {
+      onMoveNode(draggingNodeIdRef.current, localDragPos.x, localDragPos.y);
+    }
+    setLocalDragPos(null);
+    isPanningRef.current = false;
+    draggingNodeIdRef.current = null;
+    nodeDragStartRef.current = null;
 
     if (anchorDrag && mouseCanvasPos) {
       const targetNode = getHoveredTargetNode(mouseCanvasPos, anchorDrag.sourceNodeId);
@@ -475,7 +489,42 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       setAnchorDrag(null);
     }
-  };
+  }, [anchorDrag, getHoveredTargetNode, localDragPos, mouseCanvasPos, onAddNodeAtPosition, onMoveNode, onStartConnectionBetween]);
+
+  // Global event listeners during active dragging/panning to guarantee zero dropped events on mobile
+  useEffect(() => {
+    const onWindowPointerMove = (e: PointerEvent) => {
+      if (draggingNodeIdRef.current || isPanningRef.current || anchorDrag) {
+        handleMove(e);
+      }
+    };
+
+    const onWindowTouchMove = (e: TouchEvent) => {
+      if (draggingNodeIdRef.current || isPanningRef.current || anchorDrag) {
+        handleMove(e);
+      }
+    };
+
+    const onWindowPointerUp = () => {
+      if (draggingNodeIdRef.current || isPanningRef.current || anchorDrag) {
+        handleEnd();
+      }
+    };
+
+    window.addEventListener('pointermove', onWindowPointerMove);
+    window.addEventListener('touchmove', onWindowTouchMove, { passive: true });
+    window.addEventListener('pointerup', onWindowPointerUp);
+    window.addEventListener('touchend', onWindowPointerUp);
+    window.addEventListener('pointercancel', onWindowPointerUp);
+
+    return () => {
+      window.removeEventListener('pointermove', onWindowPointerMove);
+      window.removeEventListener('touchmove', onWindowTouchMove);
+      window.removeEventListener('pointerup', onWindowPointerUp);
+      window.removeEventListener('touchend', onWindowPointerUp);
+      window.removeEventListener('pointercancel', onWindowPointerUp);
+    };
+  }, [handleMove, handleEnd, anchorDrag]);
 
   // Handle 2-finger pinch to zoom & pan
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -494,8 +543,8 @@ export const Canvas: React.FC<CanvasProps> = ({
         initialCanvasX: canvasView.x,
         initialCanvasY: canvasView.y
       };
-      setIsPanning(false);
-      setDraggingNodeId(null);
+      isPanningRef.current = false;
+      draggingNodeIdRef.current = null;
     }
   };
 
@@ -530,9 +579,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           zoom: nextZoom
         });
       }
-    } else if (e.touches.length === 1) {
-      handleMove(e);
-    }
+    } // Removed 1-finger fallback to avoid PointerEvent/TouchEvent coordinate mismatch
   };
 
   const handleTouchEnd = (e: React.TouchEvent) => {
@@ -623,9 +670,6 @@ export const Canvas: React.FC<CanvasProps> = ({
       onPointerMove={handleMove}
       onPointerUp={handleEnd}
       onPointerCancel={handleEnd}
-      onMouseDown={handleStartPan}
-      onMouseMove={handleMove}
-      onMouseUp={handleEnd}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -744,10 +788,12 @@ export const Canvas: React.FC<CanvasProps> = ({
             const seqInfo = sequenceMap.get(node.id) || { sequenceNumber: 1, isChildNode: false };
             const isHoveredTarget = hoveredTargetNode?.id === node.id;
 
+            const isLocalDragging = localDragPos?.id === node.id;
+            const displayNode = isLocalDragging ? { ...node, x: localDragPos.x, y: localDragPos.y } : node;
             return (
               <NodeCard
                 key={node.id}
-                node={node}
+                node={displayNode}
                 isSelected={selectedNodeId === node.id}
                 sequenceNumber={seqInfo.sequenceNumber}
                 isChildNode={seqInfo.isChildNode}
@@ -808,49 +854,41 @@ export const Canvas: React.FC<CanvasProps> = ({
         </div>
       )}
 
-      {/* Floating Zoom Controls Panel (أزرار التحكم بالزوم والتصغير الفائق) */}
-      <div className="absolute bottom-6 left-6 z-30 flex items-center gap-1 bg-slate-900/90 border border-slate-700/80 p-1.5 rounded-2xl shadow-2xl backdrop-blur-md select-none">
+      {/* Floating Top Navigation & Zoom Panel */}
+      <div className="absolute top-4 right-4 z-30 flex items-center gap-1.5 bg-slate-900/90 border border-slate-700/80 p-1 rounded-full shadow-lg backdrop-blur-md select-none">
+        {onCenterView && (
+          <button
+            onClick={onCenterView}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:text-amber-400 font-bold rounded-full transition flex items-center gap-1.5"
+            title="توسيط اللوحة وعرض جميع العناصر (النظرة الشاملة)"
+          >
+            <Maximize2 className="w-4 h-4" />
+            <span className="text-xs">توسيط العرض</span>
+          </button>
+        )}
+        <div className="w-px h-6 bg-slate-700 mx-1"></div>
         <button
-          onClick={() => handleZoomStep(1.2)}
-          className="p-2 hover:bg-slate-800 text-slate-200 hover:text-cyan-400 rounded-xl transition"
-          title="تكبير اللوحة والعناصر (+)"
+          onClick={() => handleZoomStep(0.8)}
+          className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 rounded-full transition"
+          title="تصغير اللوحة (-)"
         >
-          <ZoomIn className="w-4 h-4" />
+          <ZoomOut className="w-4 h-4" />
         </button>
-
+        
         <button
           onClick={() => handleSetTargetZoom(1.0)}
-          className="px-2.5 py-1 text-xs font-mono font-bold text-cyan-300 hover:bg-slate-800 rounded-xl transition border border-slate-700/60"
+          className="px-2 py-1 text-xs font-mono font-bold text-cyan-300 hover:bg-slate-800 rounded-full transition border border-slate-700/60"
           title="إعادة ضبط الزوم إلى 100%"
         >
           {Math.round(canvasView.zoom * 100)}%
         </button>
 
         <button
-          onClick={() => handleZoomStep(0.8)}
-          className="p-2 hover:bg-slate-800 text-slate-200 hover:text-cyan-400 rounded-xl transition"
-          title="تصغير اللوحة (-)"
+          onClick={() => handleZoomStep(1.2)}
+          className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 rounded-full transition"
+          title="تكبير اللوحة والعناصر (+)"
         >
-          <ZoomOut className="w-4 h-4" />
-        </button>
-
-        <div className="w-px h-5 bg-slate-700 mx-0.5" />
-
-        <button
-          onClick={() => handleSetTargetZoom(0.15)}
-          className="px-2 py-1 text-[11px] font-bold bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 border border-purple-500/40 rounded-xl transition flex items-center gap-1"
-          title="تصغير خارجي شامل للمشروع كاملاً (15%)"
-        >
-          <Maximize className="w-3 h-3" />
-          <span>نظرة شاملة</span>
-        </button>
-
-        <button
-          onClick={() => handleSetTargetZoom(1.0)}
-          className="p-2 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-xl transition"
-          title="إعادة ضبط الوضع الافتراضي (100%)"
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
+          <ZoomIn className="w-4 h-4" />
         </button>
       </div>
     </div>

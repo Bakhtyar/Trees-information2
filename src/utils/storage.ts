@@ -461,31 +461,44 @@ export function exportToMarkdown(project: StoryProject): string {
   }
   md += `*تاريخ التصدير:* ${new Date().toLocaleString('ar-EG')}\n`;
   md += `*عدد المربعات والعقد:* ${project.nodes.length} | *عدد العلاقات والروابط:* ${project.connections.length}\n\n`;
+  md += `> 📌 **تنبيه تسلسل العناصر واتجاه الأسهم:** تتميز المستندات والأكواد المصدرة بالاحتفاظ بالأرقام التسلسلية الثابتة للعناصر (#1, #2, ...) كترتيب أصلي ثابت. ربط السهم بين أي عنصرين ينقل اتجاه التأثير الدرامي دون تغيير الأرقام أو إعادة ترتيب العناصر.\n\n`;
   md += `---\n\n`;
 
+  // Map original node indices
+  const nodeIndexMap = new Map<string, number>();
+  project.nodes.forEach((n, idx) => nodeIndexMap.set(n.id, idx + 1));
+
   // 1. Summary table of nodes
-  md += `## 📊 فهرس العُقد والمربعات\n\n`;
-  md += `| المعرف (ID) | العنوان | النوع | الموقع النسبى (X, Y) | الألوان |\n`;
-  md += `| :--- | :--- | :--- | :--- | :--- |\n`;
+  md += `## 📊 فهرس العُقد والمربعات (التسلسل الثابت حسب الإنشاء والموقع)\n\n`;
+  md += `| الرقم | المعرف (ID) | العنوان | النوع | الموقع النسبي (X, Y) | الألوان |\n`;
+  md += `| :--- | :--- | :--- | :--- | :--- | :--- |\n`;
   project.nodes.forEach((node) => {
+    const idxNum = nodeIndexMap.get(node.id) || 1;
     const cat = NODE_CATEGORIES[node.type];
     const catName = cat ? cat.name : node.type;
-    md += `| \`${node.id}\` | **${node.title || 'بدون عنوان'}** | ${catName} | (${Math.round(node.x)}, ${Math.round(node.y)}) | ${node.color || '#3b82f6'} |\n`;
+    md += `| **#${idxNum}** | \`${node.id}\` | **${node.title || 'بدون عنوان'}** | ${catName} | (${Math.round(node.x)}, ${Math.round(node.y)}) | ${node.color || '#3b82f6'} |\n`;
   });
   md += `\n---\n\n`;
 
   // 2. Connections Table
   if (project.connections.length > 0) {
-    md += `## 🔗 شبكة العلاقات والروابط بين العُقد\n\n`;
-    md += `| المعرف | المصدر (fromNodeId) | الهدف (toNodeId) | اسم العلاقة (relationLabel) | اتجاه السهم |\n`;
+    md += `## 🔗 شبكة العلاقات والروابط والتوجيه بالسهام\n\n`;
+    md += `| المعرف | العنصر المصدر | العنصر الهدف | نوع العلاقة | توصيف اتجاه السهم والمؤشر |\n`;
     md += `| :--- | :--- | :--- | :--- | :--- |\n`;
     project.connections.forEach((conn) => {
       const source = project.nodes.find((n) => n.id === conn.fromNodeId);
       const target = project.nodes.find((n) => n.id === conn.toNodeId);
-      const arrow = conn.bidirectional ? '⬌ مزدوج' : '➔ أحادي';
-      const sourceTitle = source ? `**${source.title}** (\`${source.id}\`)` : conn.fromNodeId;
-      const targetTitle = target ? `**${target.title}** (\`${target.id}\`)` : conn.toNodeId;
-      md += `| \`${conn.id}\` | ${sourceTitle} | ${targetTitle} | \`${conn.label || 'مرتبط بـ'}\` | ${arrow} |\n`;
+      const srcIdx = source ? (nodeIndexMap.get(source.id) || '?') : '?';
+      const tgtIdx = target ? (nodeIndexMap.get(target.id) || '?') : '?';
+
+      const sourceTitle = source ? `**#${srcIdx} ${source.title}** (\`${source.id}\`)` : conn.fromNodeId;
+      const targetTitle = target ? `**#${tgtIdx} ${target.title}** (\`${target.id}\`)` : conn.toNodeId;
+
+      const arrowDirection = conn.bidirectional
+        ? '⬌ علاقة تبادلية (مزدوجة الاتجاه)'
+        : `➔ سهم موجه من #${srcIdx} (${source?.title || 'المصدر'}) إلى #${tgtIdx} (${target?.title || 'الهدف'}) دون تغيير الترتيب`;
+
+      md += `| \`${conn.id}\` | ${sourceTitle} | ${targetTitle} | \`${conn.label || 'مرتبط بـ'}\` | ${arrowDirection} |\n`;
     });
     md += `\n---\n\n`;
   }
@@ -501,12 +514,15 @@ export function exportToMarkdown(project: StoryProject): string {
 
     md += `### 📌 ${cat.namePlural} (${catNodes.length})\n\n`;
     catNodes.forEach((node) => {
-      md += `#### 🔹 ${node.title || 'بدون عنوان'} (ID: \`${node.id}\`)\n`;
+      const idxNum = nodeIndexMap.get(node.id) || 1;
+      md += `#### 🔹 #${idxNum} - ${node.title || 'بدون عنوان'} (ID: \`${node.id}\`)\n`;
+      md += `- **الرقم التسلسلي الثابت:** #${idxNum}\n`;
       md += `- **النوع:** ${cat.name}\n`;
       md += `- **الإحداثيات:** X=${Math.round(node.x)}, Y=${Math.round(node.y)}\n`;
       if (node.parentId) {
         const parent = project.nodes.find((n) => n.id === node.parentId);
-        md += `- **عقدة فرعية تابعة لـ:** ${parent ? `**${parent.title}** (\`${parent.id}\`)` : node.parentId}\n`;
+        const parentIdx = parent ? (nodeIndexMap.get(parent.id) || '?') : '?';
+        md += `- **عقدة فرعية تابعة لـ:** ${parent ? `**#${parentIdx} ${parent.title}** (\`${parent.id}\`)` : node.parentId}\n`;
       }
       if (node.tags && node.tags.length > 0) {
         md += `- **الوسوم:** ${node.tags.map((t) => `#${t}`).join(' ')}\n`;
@@ -523,16 +539,22 @@ export function exportToMarkdown(project: StoryProject): string {
       const incoming = project.connections.filter((c) => c.toNodeId === node.id);
 
       if (outgoing.length > 0 || incoming.length > 0) {
-        md += `**الروابط المباشرة بهذا العنصر:**\n`;
+        md += `**الروابط والتوجيهات المباشرة بهذا العنصر:**\n`;
         outgoing.forEach((c) => {
           const target = project.nodes.find((n) => n.id === c.toNodeId);
-          const direction = c.bidirectional ? '⬌' : '➔';
-          md += `- ${direction} [**${c.label}**] إلى: **${target ? target.title : c.toNodeId}** (\`${c.toNodeId}\`)\n`;
+          const targetIdx = target ? (nodeIndexMap.get(target.id) || '?') : '?';
+          const direction = c.bidirectional
+            ? `⬌ علاقة تبادلية مع #${targetIdx} (${target?.title || ''})`
+            : `➔ السهم موجه من هذا العنصر (#${idxNum}) نحو العنصر #${targetIdx} (${target?.title || ''})`;
+          md += `- **[${c.label || 'مرتبط بـ'}]** مرتبط مع: **#${targetIdx} ${target ? target.title : c.toNodeId}** (${direction})\n`;
         });
         incoming.forEach((c) => {
           const source = project.nodes.find((n) => n.id === c.fromNodeId);
-          const direction = c.bidirectional ? '⬌' : '⬅';
-          md += `- ${direction} [**${c.label}**] من: **${source ? source.title : c.fromNodeId}** (\`${c.fromNodeId}\`)\n`;
+          const sourceIdx = source ? (nodeIndexMap.get(source.id) || '?') : '?';
+          const direction = c.bidirectional
+            ? `⬌ علاقة تبادلية مع #${sourceIdx} (${source?.title || ''})`
+            : `⬅ السهم موجه من العنصر #${sourceIdx} (${source?.title || ''}) نحو هذا العنصر (#${idxNum})`;
+          md += `- **[${c.label || 'مرتبط بـ'}]** موصول من: **#${sourceIdx} ${source ? source.title : c.fromNodeId}** (${direction})\n`;
         });
         md += `\n`;
       }
@@ -813,15 +835,18 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     );
   };
 
+  // Map original node indices to ensure stable numbering regardless of connection arrow direction
+  const nodeOriginalIndexMap = new Map<string, number>();
+  nodes.forEach((n, idx) => nodeOriginalIndexMap.set(n.id, idx));
+
   const uuidToSmartIdMap = new Map<string, string>();
   const uuidToIdentityMap = new Map<string, { nodeType: 'MAIN' | 'BRANCH'; mainOrderId: number | null; branchOrderId: number | null; parentMainNode: string | null }>();
 
-  // Sort main candidates by tree level then topological order
+  // Sort main candidates stably by original list index so arrow direction never swaps or renumbers MAIN nodes
   const mainCandidates = nodes.filter(n => isMainNode(n)).sort((a, b) => {
-    const lvlA = treeLevelMap.get(a.id) || 0;
-    const lvlB = treeLevelMap.get(b.id) || 0;
-    if (lvlA !== lvlB) return lvlA - lvlB;
-    return a.x !== b.x ? a.x - b.x : a.y - b.y;
+    const idxA = nodeOriginalIndexMap.get(a.id) ?? 0;
+    const idxB = nodeOriginalIndexMap.get(b.id) ?? 0;
+    return idxA - idxB;
   });
 
   // If no main candidates, designate first root or node as main
@@ -954,12 +979,11 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
 
   const analyzedNodes: Record<string, AnalyzedNodeTopology> = {};
 
-  // Sort nodes for reading order & story timeline order
+  // Sort nodes stably for story timeline order based on original index
   const chronologicalSorted = [...nodes].sort((a, b) => {
-    const lvlA = treeLevelMap.get(a.id) || 0;
-    const lvlB = treeLevelMap.get(b.id) || 0;
-    if (lvlA !== lvlB) return lvlA - lvlB;
-    return a.x !== b.x ? a.x - b.x : a.y - b.y;
+    const idxA = nodeOriginalIndexMap.get(a.id) ?? 0;
+    const idxB = nodeOriginalIndexMap.get(b.id) ?? 0;
+    return idxA - idxB;
   });
 
   const storyOrderMap = new Map<string, number>();
@@ -1139,20 +1163,12 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     };
   });
 
-  // Assign reading sequence numbers systematically
+  // Assign reading sequence numbers systematically based on original node ordering
   const nodeArray = Object.values(analyzedNodes);
   nodeArray.sort((a, b) => {
-    const priorityWeight = (item: AnalyzedNodeTopology) => {
-      if (item.aiSchema.nodeType === 'MAIN') return 1;
-      if (item.readPriorityCategory.includes('أولاً')) return 2;
-      if (item.readPriorityCategory.includes('الرئيسي')) return 3;
-      return 4;
-    };
-    const pA = priorityWeight(a);
-    const pB = priorityWeight(b);
-    if (pA !== pB) return pA - pB;
-    if (a.treeLevel !== b.treeLevel) return a.treeLevel - b.treeLevel;
-    return a.title.localeCompare(b.title);
+    const idxA = nodeOriginalIndexMap.get(a.id) ?? 0;
+    const idxB = nodeOriginalIndexMap.get(b.id) ?? 0;
+    return idxA - idxB;
   });
 
   nodeArray.forEach((an, idx) => {
@@ -1202,17 +1218,30 @@ export function analyzeStoryTopology(project: StoryProject): StoryTopologyAnalys
     const relText = c.label || 'مرتبط بـ';
     const fromSmart = uuidToSmartIdMap.get(c.fromNodeId) || c.fromNodeId;
     const toSmart = uuidToSmartIdMap.get(c.toNodeId) || c.toNodeId;
+
+    const fromIdx = (nodeOriginalIndexMap.get(c.fromNodeId) ?? 0) + 1;
+    const toIdx = (nodeOriginalIndexMap.get(c.toNodeId) ?? 0) + 1;
+    const fromTitle = from?.title || 'بدون عنوان';
+    const toTitle = to?.title || 'بدون عنوان';
+
+    const directionNote = c.bidirectional
+      ? `علاقة تبادلية (سهم مزدوج ⬌ بين #${fromIdx} و #${toIdx})`
+      : `سهم موجه من العنصر #${fromIdx} ("${fromTitle}") نحو العنصر #${toIdx} ("${toTitle}") دون تغيير ترتيب الأرقام`;
+
     return {
       id: c.id,
       fromId: c.fromNodeId,
       fromSmartId: fromSmart,
-      fromTitle: from?.title || 'بدون عنوان',
+      fromTitle,
+      fromIndex: fromIdx,
       toId: c.toNodeId,
       toSmartId: toSmart,
-      toTitle: to?.title || 'بدون عنوان',
+      toTitle,
+      toIndex: toIdx,
       label: relText,
-      semanticMeaning: `العنصر "${from?.title || 'بدون عنوان'}" (${fromSmart}) مرتبط بـ "${to?.title || 'بدون عنوان'}" (${toSmart}) بصلة: [${relText}]`,
-      bidirectional: !!c.bidirectional
+      bidirectional: !!c.bidirectional,
+      directionNote,
+      semanticMeaning: `العنصر #${fromIdx} ("${fromTitle}" | ${fromSmart}) مرتبط مع العنصر #${toIdx} ("${toTitle}" | ${toSmart}) بصلة [${relText}] — (${directionNote})`
     };
   });
 

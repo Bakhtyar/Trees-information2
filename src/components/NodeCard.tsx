@@ -198,7 +198,7 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
   return (
     <div
       data-node-id={node.id}
-      className={`absolute select-none cursor-move transition-all duration-150 overflow-visible ${
+      className={`absolute select-none cursor-move transition-shadow transition-colors duration-150 overflow-visible ${
         isNoteType 
           ? 'bg-amber-50/95 dark:bg-[#fdfbf7] text-slate-900 shadow-xl rounded-sm'
           : isHeadingType
@@ -292,17 +292,22 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
           {/* تعديل النص */}
           <button
             onClick={(e) => {
-              if (isNoteType) {
-                onExpand(e);
-              } else {
-                setIsEditingInline(!isEditingInline);
-              }
+              setIsEditingInline(!isEditingInline);
             }}
             className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-amber-300 rounded-xl transition flex items-center gap-1 text-xs font-semibold"
             title="تعديل الكتابة مباشرة"
           >
             <Edit3 className="w-4 h-4 text-amber-400" />
             <span className="hidden sm:inline">تعديل</span>
+          </button>
+
+          <button
+            onClick={onExpand}
+            className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 rounded-xl transition flex items-center gap-1 text-xs font-semibold"
+            title="فتح التفاصيل المتقدمة (تغيير النوع، ملاحظات طويلة...)"
+          >
+            <Maximize2 className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline">تفاصيل</span>
           </button>
 
           {/* نوع الخط */}
@@ -711,8 +716,8 @@ const NodeCardComponent: React.FC<NodeCardProps> = ({
                 value={inlineContent}
                 onChange={(e) => setInlineContent(e.target.value)}
                 placeholder="اكتب المحتوى هنا..."
-                rows={3}
-                className="w-full bg-slate-950 border border-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg text-xs focus:outline-none focus:border-amber-500 resize-none"
+                rows={5}
+                className="w-full bg-slate-950 border border-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg text-xs focus:outline-none focus:border-amber-500 resize-y min-h-[80px]"
               />
             )}
             <div className="flex items-center justify-end gap-1.5">
